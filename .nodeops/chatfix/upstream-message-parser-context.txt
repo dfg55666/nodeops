@@ -1,0 +1,6 @@
+===== keyword=tool pos=46204 =====
+e"),document.head.appendChild(e),await new Promise(t=>{e.onload=()=>t(),e.onerror=()=>t()})}let l=(await s.e(4223).then(s.bind(s,24223))).default;u(!0);let i=l().setOptions({steps:r.map(e=>({element:e.element,intro:e.intro,title:e.title,position:e.position})),tooltipClass:"custom-theme",showProgress:!1,showBullets:!0,exitOnOverlayClick:!1,hidePrev:!0,nextLabel:"Next",doneLabel:"Finish",scrollToElement:!0,scrollTo:"tooltip",autoPosition:!0,scrollPadding:30}).onbeforechange(function(){return setTimeout(()=>{i.refresh()},
+
+===== keyword=tool pos=46362 =====
+l().setOptions({steps:r.map(e=>({element:e.element,intro:e.intro,title:e.title,position:e.position})),tooltipClass:"custom-theme",showProgress:!1,showBullets:!0,exitOnOverlayClick:!1,hidePrev:!0,nextLabel:"Next",doneLabel:"Finish",scrollToElement:!0,scrollTo:"tooltip",autoPosition:!0,scrollPadding:30}).onbeforechange(function(){return setTimeout(()=>{i.refresh()},100),!0}).oncomplete(()=>{(0,n.aT)(e),u(!1)}).onexit(()=>{(0,n.aT)(e),u(!1)});i.start()},[o]);return(0,a.jsx)(i.Provider,{value:{registerStep:m,startTour:h,is
+
