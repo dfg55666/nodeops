@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  RefreshCw, MessageSquare, User, Bot, Activity,
+  RefreshCw, MessageSquare, User, Bot,
   ChevronDown, ChevronUp, Copy, Check, Send, ImagePlus, X,
   ChevronRight, Folder, File, AlertCircle,
 } from 'lucide-react';
@@ -25,310 +25,22 @@ function normalizeRole(role) {
   return '';
 }
 
-function extractTextFromParts(parts) {
-  if (!Array.isArray(parts)) return { text: '', tools: [] };
-  const texts = [];
-  const tools = [];
-  for (const part of parts) {
-    if (!part || typeof part !== 'object') continue;
-    const type = String(part.type || '').trim().toLowerCase();
-    if (type === 'text' && part.text) {
-      texts.push(String(part.text));
-      continue;
-    }
-    if (type.includes('tool') || type === 'function') {
-      const name = part.name || part.tool || part.toolName || part.functionName || 'unknown';
-      const input = part.input ?? part.arguments ?? part.args ?? part.parameters ?? null;
-      const output = part.output ?? part.result ?? null;
-      if (input && output) {
-        tools.push(`[tool ${name}] input=${JSON.stringify(input)} output=${JSON.stringify(output)}`);
-      } else if (input) {
-        tools.push(`[tool ${name}] input=${JSON.stringify(input)}`);
-      } else if (output) {
-        tools.push(`[tool ${name}] output=${JSON.stringify(output)}`);
-      } else {
-        tools.push(`[tool ${name}]`);
-      }
-    }
-  }
-  return { text: texts.join('\n').trim(), tools };
-}
-
-function parseRuntimePayload(payload, eventName = '') {
-  const event = String(eventName || '').trim().toLowerCase();
-  if (event === 'ping') return [];
-
-  if (!payload || typeof payload !== 'object') {
-    const txt = String(payload || '').trim();
-    if (!txt) return [];
-    return [{ role: 'system', text: event ? `[${event}] ${txt}` : txt }];
-  }
-
-  const type = String(payload.type || payload.event || '').trim();
-  const typeLower = type.toLowerCase();
-  const props = payload.properties && typeof payload.properties === 'object' ? payload.properties : {};
-
-  if (typeLower === 'server.connected') return [];
-  if (typeLower === 'context.updated') {
-    const usage = props.usage || {};
-    const tokens = usage.tokens;
-    if (typeof tokens === 'number') {
-      return [{ role: 'system', text: `[context] tokens=${tokens}` }];
-    }
-    return [];
-  }
-  if (typeLower === 'session.status') {
-    const statusType = String(props?.status?.type || '').trim();
-    if (!statusType) return [];
-    return [{ role: 'system', text: `[status] ${statusType}` }];
-  }
-  if (typeLower === 'session.error') {
-    const err = props.error || {};
-    const status = err.status ? ` ${err.status}` : '';
-    const msg = String(err.message || 'session error');
-    return [{ role: 'system', text: `[error${status}] ${msg}` }];
-  }
-  if (typeLower === 'session.idle') return [];
-  // Upstream SSE: message.part.updated → properties.part contains the part object
-  if (typeLower === 'message.part.updated') {
-    const part = props.part;
-    if (!part || typeof part !== 'object') return [];
-    const partType = String(part.type || '').trim().toLowerCase();
-    if (partType === 'text') {
-      const txt = String(part.text ?? props.delta ?? '').trim();
-      if (txt) return [{ role: 'assistant', text: txt }];
-    }
-    if (partType === 'step-finish') return [];
-    if (partType.includes('tool') || partType === 'function') {
-      const name = part.name || part.toolName || 'tool';
-      return [{ role: 'system', text: `[tool ${name}]` }];
-    }
-    return [];
-  }
-  if (typeLower === 'message.completed') return [];
-
-  const messageObj =
-    (payload.message && typeof payload.message === 'object' ? payload.message : null)
-    || (props.message && typeof props.message === 'object' ? props.message : null)
-    || (props.delta && typeof props.delta === 'object' ? props.delta : null)
-    || (props.chunk && typeof props.chunk === 'object' ? props.chunk : null);
-
-  const role = normalizeRole(
-    payload.role
-    || payload?.info?.role
-    || messageObj?.role
-    || messageObj?.info?.role
-    || props.role
-  );
-
-  const parts = Array.isArray(payload.parts)
-    ? payload.parts
-    : Array.isArray(messageObj?.parts)
-      ? messageObj.parts
-      : Array.isArray(props.parts)
-        ? props.parts
-        : [];
-  const { text: partText, tools } = extractTextFromParts(parts);
-
-  const directText = String(
-    payload.content
-    || payload.text
-    || (typeof payload.message === 'string' ? payload.message : '')
-    || messageObj?.content
-    || messageObj?.text
-    || (typeof messageObj?.message === 'string' ? messageObj.message : '')
-    || ''
-  ).trim();
-  const text = directText || partText;
-
+function normalizeMessageRows(rows) {
+  if (!Array.isArray(rows)) return [];
   const out = [];
-  if (text) {
-    out.push({ role: role || 'assistant', text });
-  }
-  for (const t of tools) {
-    out.push({ role: 'system', text: t });
-  }
-  if (out.length > 0) return out;
-
-  if (type) {
-    return [{ role: 'system', text: `[${type}]` }];
-  }
-  return [{ role: 'system', text: JSON.stringify(payload) }];
-}
-
-// ─── Parse upstream GET /session/{id}/message JSON array ─────────────────────
-// Each element: { info: { role, id, ... }, parts: [{ type:"text", text:"..." }, ...] }
-function parseRuntimeMessages(messages) {
-  if (!Array.isArray(messages)) return [];
-  const out = [];
-  for (const msg of messages) {
-    if (!msg || typeof msg !== 'object') continue;
-    const role = normalizeRole(msg?.info?.role) || 'assistant';
-    const { text, tools } = extractTextFromParts(msg.parts);
-    if (text) out.push({ role, text });
-    for (const t of tools) out.push({ role: 'system', text: t });
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const role = normalizeRole(row.role || row.sender || row.type || '');
+    const text = String(row.content || row.text || row.message || '').trim();
+    if (!role || !text) continue;
+    if (role !== 'user' && role !== 'assistant') continue;
+    const cur = { role, text };
+    const prev = out[out.length - 1];
+    if (prev && prev.role === cur.role && prev.text === cur.text) continue;
+    if (prev && prev.role === 'user' && cur.role === 'assistant' && prev.text === cur.text) continue;
+    out.push(cur);
   }
   return out;
-}
-
-// ─── Parse raw session .md content into segments ──────────────────────────────
-// Format from actual session files:
-//   **[User]** 2026-05-09 08:40:39
-//   hello
-//
-//   **[unknown]** 2026-05-09 08:40:39
-//   hello (echo)
-function parseSessionContent(raw) {
-  if (!raw || typeof raw !== 'string') return [];
-  const lines = raw.split('\n');
-  const segments = [];
-  let current = null;   // { role, lines[] }
-  let pendingSseEvent = '';
-
-  const flush = () => {
-    if (current) {
-      // Strip leading/trailing empty lines
-      while (current.lines.length && current.lines[0].trim() === '') current.lines.shift();
-      while (current.lines.length && current.lines[current.lines.length - 1].trim() === '') current.lines.pop();
-      current.text = current.lines.join('\n').trim();
-      if (current.text) segments.push(current);
-    }
-    current = null;
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // ── Raw JSON line ──────────────────────────────────────────────────────────
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-      try {
-        const obj = JSON.parse(trimmed);
-        flush();
-        segments.push(...parseRuntimePayload(obj));
-        continue;
-      } catch (_) {}
-    }
-
-    // ── Legacy inline format: [message] {...} / [ping] {} ────────────────────
-    const legacyMatch = trimmed.match(/^\[([^\]]+)\]\s*(.*)$/);
-    if (legacyMatch) {
-      const evt = String(legacyMatch[1] || '').trim();
-      const body = String(legacyMatch[2] || '').trim();
-      flush();
-      if (body.startsWith('{') && body.endsWith('}')) {
-        try {
-          const obj = JSON.parse(body);
-          segments.push(...parseRuntimePayload(obj, evt));
-          continue;
-        } catch (_) {}
-      }
-      segments.push({ role: 'system', text: evt ? `[${evt}] ${body}` : body });
-      continue;
-    }
-
-    // ── SSE event: ─────────────────────────────────────────────────────────────
-    if (/^event:\s*/i.test(trimmed)) {
-      flush();
-      pendingSseEvent = trimmed.replace(/^event:\s*/i, '').trim();
-      continue;
-    }
-
-    // ── SSE data: ──────────────────────────────────────────────────────────────
-    if (/^data:\s*/i.test(trimmed)) {
-      const payloadText = trimmed.replace(/^data:\s*/i, '').trim();
-      if (payloadText) {
-        try {
-          const obj = JSON.parse(payloadText);
-          flush();
-          segments.push(...parseRuntimePayload(obj, pendingSseEvent || 'sse'));
-          continue;
-        } catch (_) {}
-      }
-    }
-
-    // ── Markdown role markers ──────────────────────────────────────────────────
-    // Pattern: **[Role]** optional-timestamp
-    // The role tag may have 0, 1, or 2 asterisks on each side.
-    // We strip the tag AND any trailing timestamp (YYYY-MM-DD HH:MM:SS style).
-    const roleTagRe = /^\*{0,2}\[(User|Assistant|System|Unknown)\]\*{0,2}\s*/i;
-    const timestampRe = /^\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?\s*/;
-
-    if (roleTagRe.test(line)) {
-      flush();
-      const afterTag = line.replace(roleTagRe, '');
-      // Strip timestamp that follows the tag on the same line
-      const messageText = afterTag.replace(timestampRe, '').trim();
-
-      const roleMatch = line.match(roleTagRe);
-      const rawRole = (roleMatch?.[1] || 'system').toLowerCase();
-
-      // Map "unknown" → assistant (it's typically the upstream echo)
-      const role = rawRole === 'unknown' ? 'assistant' : rawRole;
-
-      current = { role, lines: messageText ? [messageText] : [] };
-      continue;
-    }
-
-    // ── Section divider ────────────────────────────────────────────────────────
-    if (/^---+$/.test(trimmed)) {
-      flush();
-      segments.push({ role: 'divider', text: '---' });
-      continue;
-    }
-
-    // ── Markdown headings ──────────────────────────────────────────────────────
-    if (/^#{1,3}\s/.test(line)) {
-      flush();
-      segments.push({ role: 'meta', text: line.replace(/^#+\s/, '') });
-      continue;
-    }
-
-    // ── Session header lines ───────────────────────────────────────────────────
-    if (/^-\s+(Account|NodeOps Session ID|Started|Ended|End Reason):/i.test(trimmed)) {
-      flush();
-      segments.push({ role: 'system', text: trimmed });
-      continue;
-    }
-
-    // ── Blank line ─────────────────────────────────────────────────────────────
-    if (trimmed === '') {
-      if (current) current.lines.push('');
-      continue;
-    }
-
-    // ── Regular text ───────────────────────────────────────────────────────────
-    if (current) {
-      current.lines.push(line);
-    } else if (trimmed) {
-      segments.push({ role: 'system', text: trimmed });
-    }
-  }
-
-  flush();
-
-  // Filter: keep dividers and anything with non-empty text.
-  // Also deduplicate consecutive identical assistant echoes (unknown lines often mirror user input).
-  const filtered = segments.filter((s) => s.role === 'divider' || (s.text && s.text.trim()));
-
-  // Remove consecutive duplicates where an assistant message immediately follows a user
-  // message with identical text (the [unknown] echo pattern in session files).
-  const deduped = [];
-  for (let i = 0; i < filtered.length; i++) {
-    const prev = deduped[deduped.length - 1];
-    const cur = filtered[i];
-    // Skip assistant echo that is identical to the preceding user message
-    if (
-      prev &&
-      prev.role === 'user' &&
-      cur.role === 'assistant' &&
-      cur.text.trim() === prev.text.trim()
-    ) {
-      continue;
-    }
-    deduped.push(cur);
-  }
-
-  return deduped;
 }
 
 // ─── Simple Markdown renderer (bold, inline code, code blocks) ────────────────
@@ -778,7 +490,6 @@ function SessionComposer({
   accountId,
   projectName,
   taskId,
-  accountDir,
   sessionFile,
   onSent,
 }) {
@@ -839,7 +550,7 @@ function SessionComposer({
       setLastError('');
     try {
       setSending(true);
-      await api.sendSessionMessage(sessionId || 'local-pending', accountId, {
+      const res = await api.sendSessionMessage(sessionId || 'local-pending', accountId, {
         text: text.trim() || null,
         image_url: imageDataUrl || null,
         image_mime: imageMime || null,
@@ -847,13 +558,21 @@ function SessionComposer({
         model: buildModelRef(modelId) || undefined,
         project_name: projectName || null,
         task_id: taskId || null,
-        account: accountDir || null,
         session_file: sessionFile || null,
       });
+      const effectiveSessionId = String(res?.effective_session_id || '').trim();
       setText('');
       clearImage();
-      showToast('消息已发送', 'success');
+      showToast(
+        effectiveSessionId
+          ? `消息已发送 (${effectiveSessionId.slice(0, 8)}…)`
+          : '消息已发送',
+        'success',
+      );
       onSent?.();
+      for (let i = 1; i <= 10; i += 1) {
+        setTimeout(() => onSent?.({ silent: true }), i * 2000);
+      }
     } catch (e) {
       const msg = e.message || 'Send failed';
       setLastError(msg);
@@ -1103,202 +822,18 @@ function SessionComposer({
   );
 }
 
-// ─── Live SSE message stream ──────────────────────────────────────────────────
-function LiveMessages({ project, taskId }) {
-  const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [connected, setConnected] = useState(false);
-  const bottomRef = useRef(null);
-
-  useEffect(() => {
-    const appendRows = (rows) => {
-      if (!Array.isArray(rows) || rows.length === 0) return;
-      setMessages((prev) => [...prev, ...rows]);
-    };
-
-    const rowsFromTaskMessage = (msg) => {
-      if (!msg || typeof msg !== 'object') return [];
-      // Upstream format: { info: { role }, parts: [...] }
-      if (msg.info && Array.isArray(msg.parts)) {
-        return parseRuntimePayload(msg);
-      }
-      const role = normalizeRole(msg.role);
-      const text = String(msg.content || msg.message || msg.text || '').trim();
-      if (text) return [{ role: role || 'assistant', text }];
-      if (msg.raw && typeof msg.raw === 'object') {
-        return parseRuntimePayload(msg.raw);
-      }
-      return [];
-    };
-
-    const rowsFromEvent = (eventType, payload) => {
-      if (!payload || typeof payload !== 'object') return [];
-
-      if (eventType === 'runtime_sse') {
-        const runtimeEvent = payload?.data?.event || payload.event || '';
-        const runtimePayload = payload?.data?.data ?? payload?.data ?? payload;
-        return parseRuntimePayload(runtimePayload, runtimeEvent);
-      }
-
-      if (eventType === 'message') {
-        return rowsFromTaskMessage(payload);
-      }
-
-      if (eventType === 'status') {
-        const status = payload?.status || payload?.data?.status;
-        if (!status) return [];
-        return [{ role: 'system', text: `[status] ${status}` }];
-      }
-
-      if (eventType === 'error') {
-        const err = payload?.error || payload?.data?.error || JSON.stringify(payload);
-        return [{ role: 'system', text: `[error] ${String(err)}` }];
-      }
-
-      return [];
-    };
-
-    api.getTaskMessages(project, taskId)
-      .then((res) => {
-        const msgs = res.data ?? res ?? [];
-        const rows = Array.isArray(msgs) ? msgs.flatMap(rowsFromTaskMessage) : [];
-        setMessages(rows);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-
-    const es = api.createTaskEventSource(project, taskId);
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-
-    es.addEventListener('message', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        appendRows(rowsFromEvent('message', data));
-      } catch (_) {
-        if (e.data) appendRows([{ role: 'system', text: e.data }]);
-      }
-    });
-
-    es.addEventListener('status', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        appendRows(rowsFromEvent('status', data));
-      } catch (_) {}
-    });
-
-    es.addEventListener('runtime_sse', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        appendRows(rowsFromEvent('runtime_sse', data));
-      } catch (_) {}
-    });
-
-    es.addEventListener('error', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        appendRows(rowsFromEvent('error', data));
-      } catch (_) {}
-    });
-
-    return () => {
-      es.close();
-      setConnected(false);
-    };
-  }, [project, taskId]);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  if (loading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: 'rgba(0,168,136,0.6)' }}>
-        <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} />
-        loading live messages…
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ borderTop: '1px solid #e2e8f0', marginTop: 8 }}>
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 16px',
-        borderBottom: '1px solid #e2e8f0',
-      }}>
-        <Activity size={11} style={{ color: '#00a888' }} />
-        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: '#00a888', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-          live stream
-        </span>
-        {connected && (
-          <span style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: '#00a888',
-            boxShadow: '0 0 4px rgba(0,168,136,0.6)',
-            animation: 'pulseDot 2s ease-in-out infinite',
-          }} />
-        )}
-        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: '#64748b', marginLeft: 'auto' }}>
-          {messages.length} events
-        </span>
-      </div>
-
-      <div style={{ padding: '4px 0' }}>
-        {messages.length === 0 && (
-          <p style={{ padding: '8px 16px', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>
-            no live events yet
-          </p>
-        )}
-        {messages.map((msg, i) => {
-          const role = msg.role || 'system';
-          const text = msg.text || msg.content || msg.message || JSON.stringify(msg);
-          const isUser = role === 'user';
-          const isAssistant = role === 'assistant';
-          return (
-            <div key={i} style={{ padding: '2px 16px' }}>
-              <div style={{
-                fontFamily: 'JetBrains Mono, monospace',
-                fontSize: 11,
-                lineHeight: 1.5,
-                padding: '6px 10px',
-                background: isUser ? 'rgba(0,168,136,0.08)'
-                  : isAssistant ? '#f1f5f9'
-                  : 'rgba(241,245,249,0.5)',
-                borderLeft: `2px solid ${isUser ? '#00a888' : isAssistant ? '#4a9eff' : '#cbd5e1'}`,
-                color: '#334155',
-              }}>
-                {role && (
-                  <span style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em', opacity: 0.6, display: 'block', marginBottom: 2 }}>
-                    {role}
-                  </span>
-                )}
-                <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{text}</pre>
-              </div>
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
-      </div>
-    </div>
-  );
-}
-
 // ─── Main SessionView ─────────────────────────────────────────────────────────
 export default function SessionView() {
   const { selectedNode } = useAppStore();
   const { tasks, accounts, fetchAccounts } = useDataStore();
 
   const [rawContent, setRawContent] = useState(null);
+  const [sessionMessages, setSessionMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('chat');
   const bottomRef = useRef(null);
 
-  const { project, taskId, accountDir, accountEmail, sessionFile, sessionId: selectedSessionId } = selectedNode || {};
+  const { project, taskId, accountEmail, sessionFile, sessionId: selectedSessionId } = selectedNode || {};
 
   const taskList = tasks[project] || [];
   const task = taskList.find((t) => (t.id || t.task_id || t.taskId) === taskId);
@@ -1308,29 +843,41 @@ export default function SessionView() {
     'bootstrapping_runtime', 'creating_session', 'sending_message',
   ].includes(task.status);
 
-  const loadContent = useCallback(async () => {
+  const loadContent = useCallback(async ({ silent = false } = {}) => {
     if (!project || !taskId || !sessionFile) return;
     try {
-      setLoading(true);
-      const res = await api.getSessionContent(project, taskId, accountDir || accountEmail || '', sessionFile);
+      if (!silent) setLoading(true);
+      const res = await api.getSessionContent(project, taskId, sessionFile);
       const payload = res?.data ?? res ?? {};
       const content = typeof payload === 'string'
         ? payload
         : (payload?.content ?? res?.content ?? '');
+      const rows = normalizeMessageRows(payload?.messages ?? []);
       setRawContent(typeof content === 'string' ? content : '');
+      setSessionMessages(rows);
     } catch (e) {
-      showToast(`Failed to load session: ${e.message}`, 'error');
+      if (!silent) showToast(`Failed to load session: ${e.message}`, 'error');
       setRawContent('');
+      setSessionMessages([]);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }, [project, taskId, accountDir, accountEmail, sessionFile]);
+  }, [project, taskId, accountEmail, sessionFile]);
 
   useEffect(() => {
     setRawContent(null);
+    setSessionMessages([]);
     setActiveTab('chat');
     loadContent();
   }, [loadContent]);
+
+  useEffect(() => {
+    if (!isLive || !project || !taskId || !sessionFile) return undefined;
+    const timer = setInterval(() => {
+      loadContent({ silent: true });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [isLive, project, taskId, sessionFile, loadContent]);
 
   useEffect(() => {
     if (!accounts || accounts.length === 0) {
@@ -1339,14 +886,13 @@ export default function SessionView() {
   }, [accounts, fetchAccounts]);
 
   useEffect(() => {
-    if (rawContent !== null) {
+    if (sessionMessages.length > 0) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [rawContent]);
+  }, [sessionMessages]);
 
-  const segments = rawContent ? parseSessionContent(rawContent) : [];
-  const userMsgs = segments.filter((s) => s.role === 'user').length;
-  const asstMsgs = segments.filter((s) => s.role === 'assistant').length;
+  const userMsgs = sessionMessages.filter((s) => s.role === 'user').length;
+  const asstMsgs = sessionMessages.filter((s) => s.role === 'assistant').length;
 
   const headerAccountEmail = extractHeaderValue(rawContent, 'Account');
   const effectiveAccountEmail = accountEmail || headerAccountEmail;
@@ -1414,7 +960,7 @@ export default function SessionView() {
                   {effectiveSessionId.slice(0, 8)}…
                 </span>
               )}
-              {segments.length > 0 && (
+              {sessionMessages.length > 0 && (
                 <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: '#94a3b8' }}>
                   {userMsgs}↑ {asstMsgs}↓
                 </span>
@@ -1487,7 +1033,7 @@ export default function SessionView() {
                 <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />
                 loading session…
               </div>
-            ) : segments.length === 0 ? (
+            ) : sessionMessages.length === 0 ? (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 128 }}>
                 <p style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12, color: '#94a3b8', fontStyle: 'italic' }}>
                   {sessionFile ? 'Empty session — no messages yet' : 'No session selected'}
@@ -1495,13 +1041,11 @@ export default function SessionView() {
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8, paddingBottom: 8 }}>
-                {segments.map((seg, i) => (
+                {sessionMessages.map((seg, i) => (
                   <MessageBubble key={i} segment={seg} />
                 ))}
               </div>
             )}
-
-            {isLive && project && taskId && <LiveMessages project={project} taskId={taskId} />}
             <div ref={bottomRef} />
           </div>
 
@@ -1510,7 +1054,6 @@ export default function SessionView() {
             accountId={effectiveAccountId}
             projectName={project}
             taskId={taskId}
-            accountDir={accountDir || effectiveAccountEmail}
             sessionFile={sessionFile}
             onSent={loadContent}
           />

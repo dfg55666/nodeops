@@ -155,9 +155,8 @@ function SessionList({ project, taskId, baseIndent, refreshKey = 0 }) {
   return (
     <>
       {sessions.map((s, i) => {
-        const accountDir   = s.account_dir || s.account || s.account_email || s.email || '';
-        const accountEmail = s.account_email || s.email || s.account || '';
-        const sessionFile  = s.session_file || s.file || s.filename || `session-${i + 1}.md`;
+        const accountEmail = s.account_email || '';
+        const sessionFile  = s.session_file || `session-${i + 1}.md`;
         const sessionId    = s.session_id || '';
         const isActive = selectedNode?.type === 'session'
           && selectedNode.project === project
@@ -171,7 +170,6 @@ function SessionList({ project, taskId, baseIndent, refreshKey = 0 }) {
               type: 'session',
               project,
               taskId,
-              accountDir,
               accountEmail,
               sessionFile,
               sessionId,
@@ -255,8 +253,7 @@ function TaskRow({ task, project, baseIndent }) {
         type: 'session',
         project,
         taskId,
-        accountDir: data.account_dir || data.account_email || '',
-        accountEmail: data.account_email || data.account_dir || '',
+        accountEmail: data.account_email || '',
         sessionFile: data.session_file || (data.session_index ? `session-${data.session_index}.md` : ''),
         sessionId: data.session_id || '',
       });

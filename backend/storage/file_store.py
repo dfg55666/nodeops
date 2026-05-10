@@ -130,8 +130,5 @@ def repo_dir(project_name: str) -> Path:
     return project_dir(project_name) / "repo"
 
 
-def session_md_path(project_name: str, task_id: str, account_email: str, session_index: int) -> Path:
-    # account_email is kept in the function signature for backward compatibility
-    # with existing call sites, but session files are now stored flat:
-    #   .nodeops/<task_id>/session-<n>.md
+def session_md_path(project_name: str, task_id: str, session_index: int) -> Path:
     return repo_dir(project_name) / ".nodeops" / task_id / f"session-{session_index}.md"

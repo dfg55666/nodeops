@@ -1,139 +1,80 @@
-# Chat 消息统一化改造计划
+# Chat 消息链路最小改造计划（3 处改动）
 
 > 日期：2026-05-10  
-> 状态：Plan Draft（待执行）
+> 目标：前端只显示对话消息；session 文件只存对话消息；移除 raw SSE 污染与重复来源
+
+## 落地状态（2026-05-10）
+
+- [x] 改动 1：后端停掉 raw SSE 落盘，session 文件仅写 user/assistant。
+- [x] 改动 2：`/api/events/session/{session_id}` 不再透传 raw SSE，改为语义化事件（`message/message_part/status/error`）。
+- [x] 改动 3：前端移除 raw SSE 解析器，Chat 仅渲染后端消息。
 
 ---
 
-## 1. 目标
+## 病根（精确版）
 
-把 NodeOps 会话链路统一成“后端解析、前端只展示消息文本”的模式，解决以下问题：
+1. `backend/services/task_engine.py`  
+   `_consume_sse_stream()` / `_flush_sse_event()` 调用了 `session_recorder.append_raw_sse()`，把 `status/context/ping/message.part.updated` 等原始事件写入了 session 文件。
 
-1. Chat 页面混入 SSE 控制事件（`status/context/message.updated`）导致样式混乱。
-2. Session 文档混入原始 SSE 块，既不利于人读，也不利于 AI 续跑读取。
-3. 用户消息偶发重复展示（同一条消息出现两次）。
+2. `backend/api/events.py`  
+   `stream_session_events()` 原样透传上游 SSE，前端被迫在 `SessionView.jsx` 做复杂事件解析，展示层混入了控制事件。
 
----
-
-## 2. 改造范围
-
-### In Scope
-
-1. 后端：SSE 事件解析、消息去重、消息持久化格式统一。
-2. 前端：只消费“标准消息结构”，不再本地解析原始 SSE。
-3. 会话文件：仅保存 `User/Assistant` 可读消息，不再保存 raw SSE。
-4. 历史读取：兼容已有旧文件（只读兼容），新文件按新格式写入。
-
-### Out of Scope
-
-1. 模型策略、任务调度策略、账号注册流程。
-2. 文件同步 / Git push 逻辑。
-3. 上游 NodeOps 协议本身的变更。
+3. 同一条用户消息存在双写路径  
+   task loop 发送后有一条本地写入，再被消息轮询路径写一次，造成 `[User]` 重复。
 
 ---
 
-## 3. 目标数据模型（单一真相源）
+## 改动 1（后端）：停掉 raw SSE 写入，保留纯消息写入
 
-后端统一输出并存储：
+文件：
+- `backend/services/task_engine.py`
+- `backend/services/session_recorder.py`
 
-```json
-{
-  "id": "msg_xxx",
-  "session_id": "xxx",
-  "role": "user|assistant",
-  "content": "plain text",
-  "created_at": "ISO8601",
-  "status": "streaming|final",
-  "client_msg_id": "optional"
-}
-```
+动作：
+1. 删除 `append_raw_sse()` 调用点（不再把原始 SSE 落盘）。
+2. session 文件只允许 `append_message(role, content)` 写入。
+3. 对 task loop 消息写入做单路径收敛，避免同一条 user 消息被写两次。
 
-约束：
-
-1. 仅 `user/assistant` 两类消息对外可见。
-2. `status/context/message.updated/message.part.updated/ping` 不入库、不出现在 UI。
-3. 同一条用户消息以 `client_msg_id` 做幂等去重。
+验收：
+1. `session-*.md` 不再出现 `[status]`、`[context]`、`[message.updated]`、raw `event:/data:` 块。
+2. 同一轮消息中 `[User]` 不重复。
 
 ---
 
-## 4. 实施步骤
+## 改动 2（后端）：SSE 接口不再透传原始块
 
-## 阶段 A：后端解析器下沉（优先）
+文件：
+- `backend/api/events.py`
 
-1. 在 `backend/services/task_engine.py` 的 SSE 消费路径中，新增“事件白名单 + 聚合器”：
-   - 只产出 `user/assistant` 消息。
-   - assistant 流式分片在后端聚合为单条最终消息（`final`）。
-2. 在 `backend/services/session_recorder.py` 新增统一写入接口：
-   - `append_user_message(...)`
-   - `append_assistant_message(...)`
-   - 移除/停用 raw SSE 写入调用点。
-3. 在 `backend/api/sessions.py` / `backend/api/events.py` 对外只返回标准消息结构。
+动作：
+1. `stream_session_events()` 不再直接转发 runtime 原始 SSE 文本。
+2. 统一输出已经语义化的消息事件（仅 user/assistant）与必要状态事件。
 
-## 阶段 B：前端消费收敛
-
-1. `frontend/src/components/SessionView.jsx` 删除 SSE 原始块渲染分支。
-2. Chat 面板只渲染后端返回的标准消息数组。
-3. 发送动作带 `client_msg_id`，避免前端 optimistic + 回读重复显示。
-
-## 阶段 C：历史兼容与迁移
-
-1. 旧会话文件读取时做“尽力提取 user/assistant 文本”兼容。
-2. 新写入统一使用新格式，不再写老式 raw 片段。
-3. 提供一次性可选脚本：将旧会话重写为纯消息格式（非强制）。
+验收：
+1. 前端不再收到原始 `event:/data:` chunk。
+2. 事件类型精简后可直接渲染，不需要复杂分支解析。
 
 ---
 
-## 5. API 约定（改造后）
+## 改动 3（前端）：删除原始 SSE 解析器，仅渲染消息
 
-1. `POST /api/.../send`  
-   - 入参支持：`content`, `model`, `client_msg_id`
-   - 返回：ack + user message id
+文件：
+- `frontend/src/components/SessionView.jsx`
 
-2. `GET /api/tasks/{...}/messages` 或 `GET /api/sessions/{...}`  
-   - 返回：标准消息列表（无 raw SSE）
+动作：
+1. 移除 `parseRuntimePayload()` 及围绕 `runtime_sse` 的复杂解析分支。
+2. Chat 区域只渲染后端提供的 `user/assistant` 文本消息。
+3. session 详情页与 `.md` 内容保持同一语义（都是“可读消息视图”）。
 
-3. SSE（若保留）  
-   - 仅推送标准消息增量，不推送上游原始 event 文本。
-
----
-
-## 6. 验收标准
-
-1. Chat 页面仅显示用户与助手最终文本，不出现 `status/context/message.updated`。
-2. Session 文档只包含可读对话，不含 raw SSE 块。
-3. 同一条用户发送不再重复出现两次。
-4. 任务 loop 和手动会话两条链路行为一致。
-5. 旧会话仍可读（允许“部分兼容”），新会话格式统一。
+验收：
+1. Chat 页面只显示用户和助手文本。
+2. 不再显示 `status/context/message.updated/ping`。
+3. 样式一致，不再出现“有些句子有样式、有些没有”。
 
 ---
 
-## 7. 风险与对策
+## 不做的事（明确删除）
 
-1. **风险：** 上游 SSE 事件格式漂移  
-   **对策：** 解析器按 schema 容错，未知事件直接忽略，不污染消息流。
-
-2. **风险：** 流式内容聚合错误导致助手文本截断  
-   **对策：** 引入 `message_id` 维度聚合 + 超时 flush + 单测覆盖。
-
-3. **风险：** 前后端并行改造造成短期不兼容  
-   **对策：** 后端先兼容旧前端字段，再切前端，最后清理兼容代码。
-
----
-
-## 8. 执行顺序建议
-
-1. 先改后端（解析、存储、接口）。
-2. 再改前端（仅消费标准消息）。
-3. 最后做旧格式兼容清理与回归测试。
-
----
-
-## 9. 关键文件清单
-
-1. `backend/services/task_engine.py`
-2. `backend/services/session_recorder.py`
-3. `backend/api/events.py`
-4. `backend/api/sessions.py`
-5. `frontend/src/components/SessionView.jsx`
-6. `frontend/src/api.js`
-
+1. 不新增复杂标准消息对象层（先不引入 `client_msg_id` / 新 schema）。
+2. 不做三阶段迁移工程。
+3. 不改 task loop、账号切换等与本问题无关模块。

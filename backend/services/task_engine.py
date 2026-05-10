@@ -256,8 +256,29 @@ async def cancel_task(project_name: str, task_id: str):
 
 
 def get_task_messages(task_id: str) -> list[dict]:
-    """Get cached messages for an active task."""
-    return _message_cache.get(task_id, [])
+    """Get normalized chat messages for an active task."""
+    cached = _message_cache.get(task_id, [])
+    if not isinstance(cached, list):
+        return []
+
+    out: list[dict] = []
+    for msg in cached:
+        if not isinstance(msg, dict):
+            continue
+        role = _normalize_chat_role(_extract_message_role(msg))
+        content = _extract_message_text(msg).strip()
+        if not content:
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        item = {"role": role, "content": content}
+        prev = out[-1] if out else None
+        if prev and prev["role"] == item["role"] and prev["content"] == item["content"]:
+            continue
+        if prev and prev["role"] == "user" and item["role"] == "assistant" and prev["content"] == item["content"]:
+            continue
+        out.append(item)
+    return out
 
 
 def is_task_running(task_id: str) -> bool:
@@ -356,7 +377,6 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
         "session_file": f"session-{next_session_index}.md",
         "account_id": account["id"],
         "account_email": account["email"],
-        "account_dir": account["email"],
     }
 
 
@@ -646,19 +666,41 @@ async def ensure_task_runtime_for_send(
     return {"runtime_host": runtime_host, "project_token": project_token}
 
 
-async def _wait_runtime_healthy(runtime_host: str, timeout: float = 60.0, interval: float = 3.0):
+async def _wait_runtime_healthy(runtime_host: str, timeout: float = 30.0, interval: float = 1.5) -> bool:
     """Poll GET /health until {"ok":true} or timeout."""
     import time as _time
+    req_timeout_s = float(os.environ.get("NODEOPS_RUNTIME_HEALTH_REQUEST_TIMEOUT_S", "4"))
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
         try:
-            data = await noc.get_health(runtime_host)
+            data = await noc.get_health(runtime_host, retries=1, timeout_s=req_timeout_s)
             if isinstance(data, dict) and data.get("ok"):
-                return
+                return True
         except Exception:
             pass
         await asyncio.sleep(interval)
     logger.warning("Runtime %s did not become healthy within %ss", runtime_host, timeout)
+    return False
+
+
+def _health_wait_enabled() -> bool:
+    return str(os.environ.get("NODEOPS_RUNTIME_WAIT_HEALTH", "true")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _health_wait_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("NODEOPS_RUNTIME_HEALTH_WAIT_SECONDS", "30")))
+    except Exception:
+        return 30.0
+
+
+def _health_poll_seconds() -> float:
+    try:
+        return max(0.2, float(os.environ.get("NODEOPS_RUNTIME_HEALTH_POLL_SECONDS", "1.5")))
+    except Exception:
+        return 1.5
 
 
 async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
@@ -707,7 +749,14 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
     project_token = _pick_project_token(new_dep)
 
     if runtime_host and project_token:
-        await _wait_runtime_healthy(runtime_host)
+        if _health_wait_enabled():
+            ok = await _wait_runtime_healthy(
+                runtime_host,
+                timeout=_health_wait_seconds(),
+                interval=_health_poll_seconds(),
+            )
+            if not ok:
+                raise RuntimeError(f"Runtime health check failed before session create: {runtime_host}")
         return {"runtime_host": runtime_host, "project_token": project_token}
 
     if not dep_id and isinstance(new_dep_payload, dict):
@@ -717,7 +766,14 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
         project_token = project_token or _pick_project_token(nested)
 
     if runtime_host and project_token:
-        await _wait_runtime_healthy(runtime_host)
+        if _health_wait_enabled():
+            ok = await _wait_runtime_healthy(
+                runtime_host,
+                timeout=_health_wait_seconds(),
+                interval=_health_poll_seconds(),
+            )
+            if not ok:
+                raise RuntimeError(f"Runtime health check failed before session create: {runtime_host}")
         return {"runtime_host": runtime_host, "project_token": project_token}
 
     if not dep_id:
@@ -731,7 +787,14 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
         project_token = _pick_project_token(dep_detail)
 
         if runtime_host and project_token:
-            await _wait_runtime_healthy(runtime_host)
+            if _health_wait_enabled():
+                ok = await _wait_runtime_healthy(
+                    runtime_host,
+                    timeout=_health_wait_seconds(),
+                    interval=_health_poll_seconds(),
+                )
+                if not ok:
+                    raise RuntimeError(f"Runtime health check failed before session create: {runtime_host}")
             return {"runtime_host": runtime_host, "project_token": project_token}
 
         await asyncio.sleep(5.0)
@@ -872,10 +935,17 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                 # Record new messages
                 if len(messages) > last_message_count:
                     for msg in messages[last_message_count:]:
-                        role = _extract_message_role(msg)
-                        content = _extract_message_text(msg)
-                        if str(role).lower() != "user" and _payload_indicates_credit_exhausted(msg):
+                        role = _normalize_chat_role(_extract_message_role(msg))
+                        content = _extract_message_text(msg).strip()
+                        if role != "user" and _payload_indicates_credit_exhausted(msg):
                             return "credit_exhausted"
+                        if not content:
+                            continue
+                        if role not in {"user", "assistant"}:
+                            continue
+                        # Outbound prompt is already persisted at send-time.
+                        if role == "user":
+                            continue
                         session_recorder.append_message(
                             project_name, task_id, account["email"],
                             task["session_index"], role, content
@@ -885,7 +955,6 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                             "session_index": task.get("session_index", 0),
                             "role": role,
                             "content": content,
-                            "raw": msg,
                         })
                     last_message_count = len(messages)
                     last_activity_at = time.monotonic()
@@ -970,7 +1039,7 @@ async def _consume_sse_stream(
     session_id: str,
     sse_state: dict[str, Any],
 ):
-    """Consume runtime SSE, append raw stream to session record, and emit task events."""
+    """Consume runtime SSE and update monitor state."""
     event_name = "message"
     data_lines: list[str] = []
 
@@ -987,9 +1056,6 @@ async def _consume_sse_stream(
 
         if line.startswith(":"):
             # SSE comment / heartbeat line
-            session_recorder.append_raw_sse(
-                project_name, task_id, account_email, session_index, line
-            )
             continue
 
         if line.startswith("event:"):
@@ -1046,11 +1112,6 @@ async def _flush_sse_event(
     data_text: str,
     sse_state: dict[str, Any],
 ):
-    raw_chunk = f"event: {event_name}\ndata: {data_text}\n"
-    session_recorder.append_raw_sse(
-        project_name, task_id, account_email, session_index, raw_chunk
-    )
-
     payload: Any = data_text
     try:
         payload = json.loads(data_text)
@@ -1088,13 +1149,6 @@ async def _flush_sse_event(
                 sse_state["last_status_at"] = time.monotonic()
                 if status_type == "busy":
                     sse_state["busy_seen"] = True
-
-    _emit_task_event(task_id, "runtime_sse", {
-        "session_id": session_id,
-        "session_index": session_index,
-        "event": event_name,
-        "data": payload,
-    })
 
 
 def _normalize_messages(messages_data: Any) -> list[dict]:
@@ -1364,3 +1418,12 @@ def _extract_message_role(msg: dict) -> str:
         if info_role:
             return str(info_role).strip().lower()
     return "unknown"
+
+
+def _normalize_chat_role(role: str) -> str:
+    r = str(role or "").strip().lower()
+    if r in {"user", "assistant"}:
+        return r
+    if r == "unknown":
+        return "assistant"
+    return r

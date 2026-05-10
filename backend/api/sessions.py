@@ -2,6 +2,9 @@
 import asyncio
 from datetime import datetime, timezone
 import logging
+import os
+import re
+import time
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from backend.services import nodeops_client as noc
@@ -30,7 +33,6 @@ class SendMessageRequest(BaseModel):
     model: ModelRef | None = None
     project_name: str | None = None
     task_id: str | None = None
-    account: str | None = None
     session_file: str | None = None
 
 
@@ -78,12 +80,32 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
     project_token = str(acc.get("project_token") or "").strip()
     effective_session_id = str(session_id or "").strip()
     task_bound_send = bool(req.project_name and req.task_id)
+    task_state = None
+    if task_bound_send:
+        task_state = task_engine.get_task(str(req.project_name or ""), str(req.task_id or ""))
+        if isinstance(task_state, dict):
+            runtime_host = str(task_state.get("current_runtime_host") or runtime_host).strip()
+            project_token = str(task_state.get("current_project_token") or project_token).strip()
+
+    local_or_pending_session = (
+        not effective_session_id
+        or effective_session_id == "local-pending"
+        or effective_session_id.startswith("local-")
+    )
+    need_bootstrap = bool(
+        task_bound_send
+        and (
+            local_or_pending_session
+            or not runtime_host
+            or not project_token
+        )
+    )
     prompt_for_runtime = (
         str(req.text or "").strip()
         or str(req.system or "").strip()
         or ("image-input" if str(req.image_url or "").strip() else "")
     )
-    if task_bound_send:
+    if need_bootstrap:
         try:
             runtime_host, project_token, effective_session_id = await _bootstrap_fresh_runtime_session_for_task_send(
                 req=req,
@@ -121,7 +143,7 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
     )
 
     data = None
-    send_attempts = 3 if task_bound_send else 1
+    send_attempts = 3
     for send_attempt in range(1, send_attempts + 1):
         try:
             data = await noc.send_message(
@@ -137,31 +159,38 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
             break
         except Exception as exc:
             err_message = str(exc)
-            should_retry = (
-                task_bound_send
-                and send_attempt < send_attempts
-                and _is_transient_upstream_error(err_message)
-            )
+            should_retry = send_attempt < send_attempts and _is_transient_upstream_error(err_message)
             if should_retry:
-                logger.warning(
-                    "Transient send failure (attempt %s/%s), rebuilding runtime/session and retrying: %s",
-                    send_attempt,
-                    send_attempts,
-                    err_message,
-                )
-                try:
-                    runtime_host, project_token, effective_session_id = await _bootstrap_fresh_runtime_session_for_task_send(
-                        req=req,
-                        account_id=account_id,
-                        account=acc,
-                        prompt_for_runtime=prompt_for_runtime,
-                    )
-                except Exception as bootstrap_exc:
+                if need_bootstrap:
                     logger.warning(
-                        "Re-bootstrap failed after transient send failure: %s",
-                        bootstrap_exc,
+                        "Transient send failure (attempt %s/%s), rebuilding runtime/session and retrying: %s",
+                        send_attempt,
+                        send_attempts,
+                        err_message,
                     )
-                    raise HTTPException(502, f"Create fresh deployment/session failed: {bootstrap_exc}")
+                    try:
+                        runtime_host, project_token, effective_session_id = await _bootstrap_fresh_runtime_session_for_task_send(
+                            req=req,
+                            account_id=account_id,
+                            account=acc,
+                            prompt_for_runtime=prompt_for_runtime,
+                        )
+                    except Exception as bootstrap_exc:
+                        logger.warning(
+                            "Re-bootstrap failed after transient send failure: %s",
+                            bootstrap_exc,
+                        )
+                        raise HTTPException(502, f"Create fresh deployment/session failed: {bootstrap_exc}")
+                else:
+                    wait_s = min(2 ** (send_attempt - 1), 3)
+                    logger.warning(
+                        "Transient send failure (attempt %s/%s), retrying same session after %ss: %s",
+                        send_attempt,
+                        send_attempts,
+                        wait_s,
+                        err_message,
+                    )
+                    await asyncio.sleep(wait_s)
                 continue
 
             logger.exception(
@@ -223,17 +252,32 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
             has_image=bool(str(req.image_url or "").strip()),
             project_name=req.project_name,
             task_id=req.task_id,
-            account=req.account,
             session_file=req.session_file,
         )
+        # Background sync assistant/user messages from upstream so
+        # session .md stays aligned with runtime chat output.
+        if req.project_name and req.task_id and req.session_file:
+            sent_user_message_id = _extract_send_response_message_id(data)
+            asyncio.create_task(
+                _sync_session_file_from_runtime(
+                    project_name=req.project_name,
+                    task_id=req.task_id,
+                    session_file=req.session_file,
+                    runtime_host=runtime_host,
+                    project_token=project_token,
+                    auth_token=acc["auth_token"],
+                    session_id=effective_session_id,
+                    sent_user_message_id=sent_user_message_id,
+                    sent_user_text=str(req.text or "").strip(),
+                )
+            )
     except Exception:
         # Don't fail upstream send for local history issues.
         logger.exception(
-            "Failed appending local user message: session_id=%s project=%s task=%s account=%s session_file=%s",
+            "Failed appending local user message: session_id=%s project=%s task=%s session_file=%s",
             session_id,
             req.project_name,
             req.task_id,
-            req.account,
             req.session_file,
         )
 
@@ -271,11 +315,7 @@ def get_session_history(project_name: str, task_id: str):
         account_email = _extract_header_value(raw, "Account") or ""
         session_id = _extract_header_value(raw, "NodeOps Session ID")
         sessions.append({
-            "account_dir": account_email,
-            "account": account_email,
             "account_email": account_email,
-            "email": account_email,
-            "file": md_file.name,
             "session_file": md_file.name,
             "path": str(md_file.relative_to(repo_dir(project_name))),
             "session_id": session_id,
@@ -285,7 +325,6 @@ def get_session_history(project_name: str, task_id: str):
 
 @router.get("/history/{project_name}/{task_id}/content")
 def get_session_content(project_name: str, task_id: str,
-                        account: str = Query(...),
                         session_file: str = Query(...)):
     """Read the content of a session .md file."""
     from backend.storage.file_store import repo_dir
@@ -294,7 +333,8 @@ def get_session_content(project_name: str, task_id: str,
     if not path.exists():
         raise HTTPException(404, "Session file not found")
     content = read_md(path)
-    return {"success": True, "data": {"content": content}}
+    messages = _parse_session_messages(content)
+    return {"success": True, "data": {"content": content, "messages": messages}}
 
 
 def _extract_header_value(raw: str, key: str) -> str | None:
@@ -308,13 +348,62 @@ def _extract_header_value(raw: str, key: str) -> str | None:
     return None
 
 
+_ROLE_LINE_RE = re.compile(r"^\*{0,2}\[(User|Assistant)\]\*{0,2}\s*(.*)$", re.IGNORECASE)
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})?\s*")
+
+
+def _parse_session_messages(raw: str) -> list[dict]:
+    if not raw:
+        return []
+
+    out: list[dict] = []
+    current_role = ""
+    current_lines: list[str] = []
+
+    def flush():
+        nonlocal current_role, current_lines
+        if not current_role:
+            current_lines = []
+            return
+        text = "\n".join(current_lines).strip()
+        current_lines = []
+        if not text:
+            current_role = ""
+            return
+        item = {"role": current_role, "content": text}
+        prev = out[-1] if out else None
+        if prev and prev["role"] == item["role"] and prev["content"] == item["content"]:
+            current_role = ""
+            return
+        if prev and prev["role"] == "user" and item["role"] == "assistant" and prev["content"] == item["content"]:
+            current_role = ""
+            return
+        out.append(item)
+        current_role = ""
+
+    for raw_line in raw.splitlines():
+        line = str(raw_line or "")
+        m = _ROLE_LINE_RE.match(line)
+        if m:
+            flush()
+            role = str(m.group(1) or "").strip().lower()
+            rest = _TS_RE.sub("", str(m.group(2) or "")).strip()
+            current_role = role
+            current_lines = [rest] if rest else []
+            continue
+        if current_role:
+            current_lines.append(line)
+
+    flush()
+    return out
+
+
 def _append_local_user_message(
     session_id: str,
     text: str,
     has_image: bool,
     project_name: str | None,
     task_id: str | None,
-    account: str | None,
     session_file: str | None,
 ):
     from backend.storage.file_store import repo_dir
@@ -329,36 +418,13 @@ def _append_local_user_message(
     if not base.exists():
         return
 
-    candidates: list[Path] = []
-    # Preferred new layout path.
-    candidates.append(base / sf)
+    target = base / sf
+    if not target.exists():
+        return
 
-    # Flat layout scan.
-    for p in sorted(base.glob("session-*.md")):
-        candidates.append(p)
-
-    # Deduplicate while preserving order.
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for p in candidates:
-        key = str(p)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(p)
-    candidates = deduped
-
-    target = None
-    for p in candidates:
-        if not p.exists():
-            continue
-        raw = read_md(p)
-        sid = _extract_header_value(raw, "NodeOps Session ID")
-        if sid and sid == session_id:
-            target = p
-            break
-
-    if target is None:
+    raw_target = read_md(target)
+    sid = _extract_header_value(raw_target, "NodeOps Session ID")
+    if sid and sid != session_id:
         return
 
     content = str(text or "").strip()
@@ -367,8 +433,266 @@ def _append_local_user_message(
     if not content:
         return
 
+    existing = _parse_session_messages(raw_target)
+    if existing:
+        last = existing[-1]
+        if str(last.get("role")) == "user" and str(last.get("content") or "").strip() == content:
+            return
+
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     append_md(target, f"[User] {ts}\n{content}\n\n")
+
+
+def _extract_runtime_message_role(msg: dict) -> str:
+    role = msg.get("role")
+    if role:
+        return str(role).strip().lower()
+    info = msg.get("info")
+    if isinstance(info, dict):
+        info_role = info.get("role")
+        if info_role:
+            return str(info_role).strip().lower()
+    return "unknown"
+
+
+def _extract_runtime_message_text(msg: dict) -> str:
+    if isinstance(msg.get("content"), str):
+        return str(msg.get("content") or "")
+    parts = msg.get("parts", msg.get("content", []))
+    if isinstance(parts, list):
+        texts: list[str] = []
+        for part in parts:
+            if isinstance(part, dict) and str(part.get("type") or "") == "text":
+                texts.append(str(part.get("text") or ""))
+            elif isinstance(part, str):
+                texts.append(part)
+        joined = "\n".join([t for t in texts if str(t).strip()])
+        if joined.strip():
+            return joined
+    return str(msg.get("text") or "")
+
+
+def _extract_runtime_message_id(msg: dict) -> str:
+    info = msg.get("info")
+    if isinstance(info, dict):
+        return str(info.get("id") or "").strip()
+    return ""
+
+
+def _extract_runtime_message_has_error(msg: dict) -> bool:
+    info = msg.get("info")
+    return isinstance(info, dict) and isinstance(info.get("error"), dict)
+
+
+def _extract_runtime_message_has_step_finish(msg: dict) -> bool:
+    parts = msg.get("parts", msg.get("content", []))
+    if not isinstance(parts, list):
+        return False
+    for part in parts:
+        if isinstance(part, dict) and str(part.get("type") or "").strip().lower() == "step-finish":
+            return True
+    return False
+
+
+def _extract_runtime_message_objects(messages_data: object) -> list[dict]:
+    if isinstance(messages_data, list):
+        return [m for m in messages_data if isinstance(m, dict)]
+    if isinstance(messages_data, dict):
+        raw = (
+            messages_data.get("messages")
+            or messages_data.get("items")
+            or messages_data.get("data")
+            or []
+        )
+        if isinstance(raw, list):
+            return [m for m in raw if isinstance(m, dict)]
+    return []
+
+
+def _normalize_runtime_messages(messages_data: object) -> list[dict]:
+    rows = _extract_runtime_message_objects(messages_data)
+    out: list[dict] = []
+    for msg in rows:
+        role = _extract_runtime_message_role(msg)
+        if role == "unknown":
+            role = "assistant"
+        if role not in {"user", "assistant"}:
+            continue
+        content = _extract_runtime_message_text(msg).strip()
+        if not content:
+            continue
+        item = {"role": role, "content": content}
+        prev = out[-1] if out else None
+        if prev and prev["role"] == item["role"] and prev["content"] == item["content"]:
+            continue
+        if prev and prev["role"] == "user" and item["role"] == "assistant" and prev["content"] == item["content"]:
+            continue
+        out.append(item)
+    return out
+
+
+def _normalize_runtime_messages_meta(messages_data: object) -> list[dict]:
+    rows = _extract_runtime_message_objects(messages_data)
+    out: list[dict] = []
+    for msg in rows:
+        role = _extract_runtime_message_role(msg)
+        if role == "unknown":
+            role = "assistant"
+        if role not in {"user", "assistant"}:
+            continue
+        out.append({
+            "id": _extract_runtime_message_id(msg),
+            "role": role,
+            "content": _extract_runtime_message_text(msg).strip(),
+            "has_step_finish": _extract_runtime_message_has_step_finish(msg),
+            "has_error": _extract_runtime_message_has_error(msg),
+        })
+    return out
+
+
+def _is_runtime_turn_complete(
+    rows_meta: list[dict],
+    sent_user_message_id: str | None,
+    sent_user_text: str | None,
+) -> bool:
+    if not rows_meta:
+        return False
+
+    sid = str(sent_user_message_id or "").strip()
+    stext = str(sent_user_text or "").strip()
+    start_idx = -1
+
+    if sid:
+        for i, row in enumerate(rows_meta):
+            if row.get("role") == "user" and str(row.get("id") or "").strip() == sid:
+                start_idx = i
+
+    if start_idx < 0 and stext:
+        for i, row in enumerate(rows_meta):
+            if row.get("role") == "user" and str(row.get("content") or "").strip() == stext:
+                start_idx = i
+
+    if start_idx < 0:
+        # If we cannot locate the triggering user row, don't terminate early.
+        return False
+
+    for row in rows_meta[start_idx + 1:]:
+        if row.get("has_error"):
+            return True
+        if row.get("role") == "assistant" and row.get("has_step_finish"):
+            return True
+    return False
+
+
+def _extract_send_response_message_id(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return ""
+    return str(info.get("id") or "").strip()
+
+
+async def _sync_session_file_from_runtime(
+    project_name: str,
+    task_id: str,
+    session_file: str,
+    runtime_host: str,
+    project_token: str,
+    auth_token: str,
+    session_id: str,
+    sent_user_message_id: str | None = None,
+    sent_user_text: str | None = None,
+):
+    from backend.storage.file_store import repo_dir
+
+    base = repo_dir(project_name) / ".nodeops" / task_id
+    path = base / str(session_file or "")
+    if not path.exists():
+        return
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+
+    try:
+        poll_interval_s = max(
+            1.0, float(os.environ.get("NODEOPS_SESSION_SYNC_POLL_INTERVAL_S", "5"))
+        )
+    except Exception:
+        poll_interval_s = 5.0
+    try:
+        max_wait_s = max(
+            poll_interval_s, float(os.environ.get("NODEOPS_SESSION_SYNC_MAX_SECONDS", "900"))
+        )
+    except Exception:
+        max_wait_s = 900.0
+
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        try:
+            remote = await noc.get_messages(runtime_host, project_token, auth_token, sid)
+            remote_msgs = _normalize_runtime_messages(remote)
+            remote_meta = _normalize_runtime_messages_meta(remote)
+            raw = read_md(path)
+            local_msgs = _parse_session_messages(raw)
+
+            start = 0
+            if local_msgs:
+                last = local_msgs[-1]
+                matched = False
+                for idx in range(len(remote_msgs) - 1, -1, -1):
+                    if (
+                        remote_msgs[idx]["role"] == last["role"]
+                        and remote_msgs[idx]["content"].strip() == str(last.get("content") or "").strip()
+                    ):
+                        start = idx + 1
+                        matched = True
+                        break
+                if not matched:
+                    prefix = 0
+                    while (
+                        prefix < len(local_msgs)
+                        and prefix < len(remote_msgs)
+                        and local_msgs[prefix]["role"] == remote_msgs[prefix]["role"]
+                        and str(local_msgs[prefix].get("content") or "").strip() == remote_msgs[prefix]["content"].strip()
+                    ):
+                        prefix += 1
+                    start = prefix
+
+            new_rows = remote_msgs[start:]
+            if new_rows:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                chunks: list[str] = []
+                for row in new_rows:
+                    tag = "Assistant" if row["role"] == "assistant" else "User"
+                    chunks.append(f"[{tag}] {ts}\n{row['content']}\n\n")
+                append_md(path, "".join(chunks))
+
+            if _is_runtime_turn_complete(
+                remote_meta,
+                sent_user_message_id=sent_user_message_id,
+                sent_user_text=sent_user_text,
+            ):
+                return
+        except Exception:
+            logger.debug(
+                "session sync retry failed: project=%s task=%s file=%s session=%s",
+                project_name,
+                task_id,
+                session_file,
+                sid,
+                exc_info=True,
+            )
+        await asyncio.sleep(poll_interval_s)
+
+    logger.info(
+        "Session sync timed out before completion marker: project=%s task=%s file=%s session=%s wait=%ss",
+        project_name,
+        task_id,
+        session_file,
+        sid,
+        int(max_wait_s),
+    )
 
 
 async def _bootstrap_fresh_runtime_session_for_task_send(
@@ -557,6 +881,8 @@ def _is_transient_upstream_error(message: str) -> bool:
         "connection reset",
         "temporarily unavailable",
         "temporary failure",
+        "health check failed",
+        "/health",
     )
     if any(kw in msg for kw in transient_keywords):
         return True

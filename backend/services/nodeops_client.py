@@ -578,8 +578,13 @@ async def get_file_status(runtime_host: str, project_token: str, auth_token: str
     return _unwrap_data(payload)
 
 
-async def get_health(runtime_host: str) -> Any:
-    resp = await _retry_request("GET", f"{_runtime_base(runtime_host)}/health")
+async def get_health(runtime_host: str, retries: int = 1, timeout_s: float = 4.0) -> Any:
+    resp = await _retry_request(
+        "GET",
+        f"{_runtime_base(runtime_host)}/health",
+        retries=max(1, int(retries)),
+        timeout=timeout_s,
+    )
     resp.raise_for_status()
     return _parse_json(resp)
 

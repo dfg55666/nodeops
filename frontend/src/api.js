@@ -66,10 +66,10 @@ export const getTaskMessages    = (project, taskId) =>
 // ─── Session History ──────────────────────────────────────────────────────────
 export const getSessionHistory  = (project, taskId) =>
   get(`/api/sessions/history/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}`);
-export const getSessionContent  = (project, taskId, account, sessionFile) =>
+export const getSessionContent  = (project, taskId, sessionFile) =>
   get(
     `/api/sessions/history/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/content` +
-    `?account=${encodeURIComponent(account || '')}&session_file=${encodeURIComponent(sessionFile)}`
+    `?session_file=${encodeURIComponent(sessionFile)}`
   );
 export const sendSessionMessage = (sessionId, accountId, data) =>
   post(

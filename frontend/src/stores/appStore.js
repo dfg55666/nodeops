@@ -3,7 +3,7 @@ import { create } from 'zustand';
 // selectedNode shapes:
 //   { type: 'project', project: string }
 //   { type: 'task',    project: string, taskId: string }
-//   { type: 'session', project: string, taskId: string, accountDir: string, accountEmail: string, sessionFile: string, sessionId?: string }
+//   { type: 'session', project: string, taskId: string, accountEmail: string, sessionFile: string, sessionId?: string }
 
 const useAppStore = create((set) => ({
   selectedNode: null,
