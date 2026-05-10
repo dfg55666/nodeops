@@ -1,0 +1,18 @@
+{
+  "created_at": "2026-03-10T11:40:45Z",
+  "source": "outlook",
+  "email": "kcunmegp2192@hotmail.com",
+  "uuid": "2d15226e-dc18-4d41-9ab8-6314ebe05a1e",
+  "x_auth_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJrY3VubWVncDIxOTJAaG90bWFpbC5jb20iLCJleHAiOjE3NzMzMTU2NDUsImlhdCI6MTc3MzE0Mjg0NSwic3ViIjoiMmQxNTIyNmUtZGMxOC00ZDQxLTlhYjgtNjMxNGViZTA1YTFlIn0.idsRDsYdWHCAAMTesDgUhsBwiNCcp8ce7dp-HcLNJGE",
+  "is_new_user": true,
+  "is_wallet_registered": false,
+  "verify_response": {
+    "data": {
+      "is_new_user": true,
+      "is_wallet_registered": false,
+      "registered_wallet": null,
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJrY3VubWVncDIxOTJAaG90bWFpbC5jb20iLCJleHAiOjE3NzMzMTU2NDUsImlhdCI6MTc3MzE0Mjg0NSwic3ViIjoiMmQxNTIyNmUtZGMxOC00ZDQxLTlhYjgtNjMxNGViZTA1YTFlIn0.idsRDsYdWHCAAMTesDgUhsBwiNCcp8ce7dp-HcLNJGE",
+      "uuid": "2d15226e-dc18-4d41-9ab8-6314ebe05a1e"
+    }
+  }
+}

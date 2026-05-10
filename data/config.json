@@ -1,0 +1,6 @@
+{
+  "poll_interval_running": 5,
+  "poll_interval_idle": 30,
+  "idle_timeout": 120,
+  "max_default_loops": 10
+}

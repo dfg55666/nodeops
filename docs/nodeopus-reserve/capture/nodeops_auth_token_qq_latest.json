@@ -1,0 +1,51 @@
+{
+  "created_at": "2026-02-12T15:53:47Z",
+  "source": "qq",
+  "email": "8j8xy6dvtq@jdjf999.ggff.net",
+  "uuid": "8af4660e-87da-488a-bc3c-b3d08d997100",
+  "x_auth_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiI4ajh4eTZkdnRxQGpkamY5OTkuZ2dmZi5uZXQiLCJleHAiOjE3NzEwODQ0MjcsImlhdCI6MTc3MDkxMTYyNywic3ViIjoiOGFmNDY2MGUtODdkYS00ODhhLWJjM2MtYjNkMDhkOTk3MTAwIn0.XJMQPzcsGMVO6EK0n2wFBV4xLKuJQM8xI-62AmalD9U",
+  "is_new_user": true,
+  "is_wallet_registered": false,
+  "verify_response": {
+    "data": {
+      "is_new_user": true,
+      "is_wallet_registered": false,
+      "registered_wallet": null,
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiI4ajh4eTZkdnRxQGpkamY5OTkuZ2dmZi5uZXQiLCJleHAiOjE3NzEwODQ0MjcsImlhdCI6MTc3MDkxMTYyNywic3ViIjoiOGFmNDY2MGUtODdkYS00ODhhLWJjM2MtYjNkMDhkOTk3MTAwIn0.XJMQPzcsGMVO6EK0n2wFBV4xLKuJQM8xI-62AmalD9U",
+      "uuid": "8af4660e-87da-488a-bc3c-b3d08d997100"
+    }
+  },
+  "deployment_id": "45cdd59e-36bd-4642-8fa2-c7ede8a60a79",
+  "server_endpoint": "https://affectionate-mclaren5-283217.syra.nodeops.app",
+  "x_project_token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiOGFmNDY2MGUtODdkYS00ODhhLWJjM2MtYjNkMDhkOTk3MTAwIiwiZGVwbG95bWVudF9pZCI6IjQ1Y2RkNTllLTM2YmQtNDY0Mi04ZmEyLWM3ZWRlOGE2MGE3OSIsImlzcyI6InZpYmUtY29kZXItYmUiLCJhdWQiOiI0NWNkZDU5ZS0zNmJkLTQ2NDItOGZhMi1jN2VkZThhNjBhNzkiLCJleHAiOjE3NzM1MDM2MzIsImlhdCI6MTc3MDkxMTYzMiwibmJmIjoxNzcwOTExNjMyLCJqdGkiOiI3NmJlMTM3Ni0wOGIzLTQwZmEtYjczNC0xMzkyNjJiYWM0YmIifQ.h-FXWC38Nrv2jLTuddiISkT9yCkgQN3hbVkifJ2ecb5uupH8Z3marHkvYtNKreUyqxPvzIgjomPR87SbXAo2ng",
+  "session_id": "ses_3ad70e24effe42COyt5MgRgujg",
+  "deployment_response": {
+    "status": "success",
+    "data": {
+      "id": "45cdd59e-36bd-4642-8fa2-c7ede8a60a79",
+      "name": "affectionate-mclaren5-283217",
+      "project_name": "Project Genesis",
+      "project_description": "A foundational project to initialize and set up core systems, providing a robust starting point for future development and scalability.",
+      "status": "running",
+      "created_at": "2026-02-11T19:03:16Z",
+      "assigned_at": "2026-02-12T15:53:51Z",
+      "server_endpoint": "https://affectionate-mclaren5-283217.syra.nodeops.app",
+      "token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiOGFmNDY2MGUtODdkYS00ODhhLWJjM2MtYjNkMDhkOTk3MTAwIiwiZGVwbG95bWVudF9pZCI6IjQ1Y2RkNTllLTM2YmQtNDY0Mi04ZmEyLWM3ZWRlOGE2MGE3OSIsImlzcyI6InZpYmUtY29kZXItYmUiLCJhdWQiOiI0NWNkZDU5ZS0zNmJkLTQ2NDItOGZhMi1jN2VkZThhNjBhNzkiLCJleHAiOjE3NzM1MDM2MzIsImlhdCI6MTc3MDkxMTYzMiwibmJmIjoxNzcwOTExNjMyLCJqdGkiOiI3NmJlMTM3Ni0wOGIzLTQwZmEtYjczNC0xMzkyNjJiYWM0YmIifQ.h-FXWC38Nrv2jLTuddiISkT9yCkgQN3hbVkifJ2ecb5uupH8Z3marHkvYtNKreUyqxPvzIgjomPR87SbXAo2ng",
+      "metadata": {
+        "opencode_opened": true
+      }
+    }
+  },
+  "session_response": {
+    "id": "ses_3ad70e24effe42COyt5MgRgujg",
+    "slug": "misty-meadow",
+    "version": "1.1.51",
+    "projectID": "global",
+    "directory": "/workspace",
+    "title": "New session - 2026-02-12T15:53:56.913Z",
+    "time": {
+      "created": 1770911636913,
+      "updated": 1770911636913
+    }
+  }
+}

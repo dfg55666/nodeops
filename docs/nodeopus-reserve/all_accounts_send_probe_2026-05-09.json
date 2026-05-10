@@ -1,0 +1,356 @@
+{
+  "generated_at": 1778336439,
+  "total": 12,
+  "ok": 7,
+  "fail": 5,
+  "items": [
+    {
+      "email": "feijidfg55+codex20260509142517@gmail.com",
+      "account_id": "257f0c57-5be6-45a3-8e2f-e89647efa9d8",
+      "status": "exhausted",
+      "locked_by_task": "abc",
+      "session_id": "ses_1f41aaea7ffefhRcmYE0M9UD3X",
+      "session_source": "list",
+      "send_http": 502,
+      "send_resp": {
+        "detail": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+      },
+      "ok": false,
+      "stage": "send",
+      "reason": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+    },
+    {
+      "email": "feijidfg55+no001@gmail.com",
+      "account_id": "bdd279f5-0508-4727-8932-e2745f58d47a",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "6b02eb30-3a65-468d-b46d-533a1b5dda83",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-4e24-7a92-8324-bc1a0240998c",
+            "sessionID": "6b02eb30-3a65-468d-b46d-533a1b5dda83",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:19.364Z",
+              "completed": "2026-05-09T14:20:19.364Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-4e29-7a6a-b728-ab8f039b7928",
+              "sessionID": "6b02eb30-3a65-468d-b46d-533a1b5dda83",
+              "messageID": "019e0d1c-4e24-7a92-8324-bc1a0240998c",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:19.364Z",
+                "end": "2026-05-09T14:20:19.364Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+no002@gmail.com",
+      "account_id": "552dda5e-2c79-4b61-8595-9f4877ab1320",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "dabb4b6e-933b-449a-a1e0-ccbb3f2e23cf",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-56de-7a52-8148-33eaeb6e9f65",
+            "sessionID": "dabb4b6e-933b-449a-a1e0-ccbb3f2e23cf",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:21.597Z",
+              "completed": "2026-05-09T14:20:21.597Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-56e2-768a-a808-d9723d2e8fc6",
+              "sessionID": "dabb4b6e-933b-449a-a1e0-ccbb3f2e23cf",
+              "messageID": "019e0d1c-56de-7a52-8148-33eaeb6e9f65",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:21.597Z",
+                "end": "2026-05-09T14:20:21.597Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+l53k@gmail.com",
+      "account_id": "b06784b9-5dd3-4377-bb91-9b09bffa469e",
+      "status": "exhausted",
+      "locked_by_task": null,
+      "session_id": "ses_1f4300611ffeSRs2xD4Uyd62k0",
+      "session_source": "list",
+      "send_http": 502,
+      "send_resp": {
+        "detail": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+      },
+      "ok": false,
+      "stage": "send",
+      "reason": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+    },
+    {
+      "email": "feijidfg55+ko3b@gmail.com",
+      "account_id": "39331c31-e7a6-4857-b0e9-1e6c2d094411",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "7d5280c8-665d-4633-90cc-ba0959d142cf",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-6593-7c5d-b773-1231a19da8a4",
+            "sessionID": "7d5280c8-665d-4633-90cc-ba0959d142cf",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:25.363Z",
+              "completed": "2026-05-09T14:20:25.363Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-6597-77c2-9a68-13a5470ad2c5",
+              "sessionID": "7d5280c8-665d-4633-90cc-ba0959d142cf",
+              "messageID": "019e0d1c-6593-7c5d-b773-1231a19da8a4",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:25.363Z",
+                "end": "2026-05-09T14:20:25.363Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+97ro@gmail.com",
+      "account_id": "ea253096-fd7d-4151-bd70-98641f4170d7",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "537f7b9d-0d8e-4686-98bd-3cc6d30d15d5",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-6e56-7afe-ac99-850c0697c360",
+            "sessionID": "537f7b9d-0d8e-4686-98bd-3cc6d30d15d5",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:27.606Z",
+              "completed": "2026-05-09T14:20:27.606Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-6e5a-7be3-bf37-1d7d046df521",
+              "sessionID": "537f7b9d-0d8e-4686-98bd-3cc6d30d15d5",
+              "messageID": "019e0d1c-6e56-7afe-ac99-850c0697c360",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:27.606Z",
+                "end": "2026-05-09T14:20:27.606Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+cves@gmail.com",
+      "account_id": "3203021e-7d50-4ec3-98aa-9664a2be4075",
+      "status": "exhausted",
+      "locked_by_task": null,
+      "session_id": "ses_1f4277787ffen3O70TSVMKGetR",
+      "session_source": "list",
+      "send_http": 502,
+      "send_resp": {
+        "detail": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+      },
+      "ok": false,
+      "stage": "send",
+      "reason": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+    },
+    {
+      "email": "feijidfg55+oc5e@gmail.com",
+      "account_id": "df84538e-d166-46b1-b179-237731d38793",
+      "status": "exhausted",
+      "locked_by_task": null,
+      "session_id": "ses_1f427753effe4H0WKCwDNq9RYT",
+      "session_source": "list",
+      "send_http": 502,
+      "send_resp": {
+        "detail": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+      },
+      "ok": false,
+      "stage": "send",
+      "reason": "[403] Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys | model=anthropic/claude-sonnet-4.6"
+    },
+    {
+      "email": "feijidfg55+uwq5@gmail.com",
+      "account_id": "fe8c6f1b-ec3e-4782-8e4a-d344bb9840bc",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "e67b66c2-d620-42ba-bc54-d37f0db43be5",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-84c7-7c87-b1e2-2c186eb14e6b",
+            "sessionID": "e67b66c2-d620-42ba-bc54-d37f0db43be5",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:33.350Z",
+              "completed": "2026-05-09T14:20:33.350Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-84cb-7557-af5e-0f4f37cbe72e",
+              "sessionID": "e67b66c2-d620-42ba-bc54-d37f0db43be5",
+              "messageID": "019e0d1c-84c7-7c87-b1e2-2c186eb14e6b",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:33.350Z",
+                "end": "2026-05-09T14:20:33.350Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+jza1@gmail.com",
+      "account_id": "cd606e47-03a0-41bd-8b25-eab75bdc76d2",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "78a62e56-afb9-40ba-a868-dfcaf3262a53",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-8e93-7d37-84e6-4093c5ed4068",
+            "sessionID": "78a62e56-afb9-40ba-a868-dfcaf3262a53",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:35.859Z",
+              "completed": "2026-05-09T14:20:35.859Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-8e97-7a6b-ab98-39b140a93851",
+              "sessionID": "78a62e56-afb9-40ba-a868-dfcaf3262a53",
+              "messageID": "019e0d1c-8e93-7d37-84e6-4093c5ed4068",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:35.859Z",
+                "end": "2026-05-09T14:20:35.859Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+zfzm@gmail.com",
+      "account_id": "39b93c28-0805-4720-8b14-ff9d77157a42",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "3cf54758-9aaf-4b65-96ea-fe408a469c2a",
+      "session_source": "create_session",
+      "send_http": 200,
+      "send_resp": {
+        "success": true,
+        "data": {
+          "info": {
+            "id": "019e0d1c-9792-7af4-aa8a-5aa1eac75e50",
+            "sessionID": "3cf54758-9aaf-4b65-96ea-fe408a469c2a",
+            "role": "user",
+            "time": {
+              "created": "2026-05-09T14:20:38.161Z",
+              "completed": "2026-05-09T14:20:38.161Z"
+            }
+          },
+          "parts": [
+            {
+              "id": "019e0d1c-979f-7b2b-a475-d89ad67f48ae",
+              "sessionID": "3cf54758-9aaf-4b65-96ea-fe408a469c2a",
+              "messageID": "019e0d1c-9792-7af4-aa8a-5aa1eac75e50",
+              "type": "text",
+              "text": "probe: backend full-account check",
+              "time": {
+                "start": "2026-05-09T14:20:38.161Z",
+                "end": "2026-05-09T14:20:38.161Z"
+              }
+            }
+          ]
+        }
+      },
+      "ok": true,
+      "stage": "send",
+      "reason": "ok"
+    },
+    {
+      "email": "feijidfg55+ihq4@gmail.com",
+      "account_id": "92a42857-4c91-4c57-a0e5-ef335bb2acc2",
+      "status": "available",
+      "locked_by_task": null,
+      "session_id": "e636f8c8-ad1a-472d-b3a8-7c734407603c",
+      "session_source": "account.session_id",
+      "send_http": 502,
+      "send_resp": {
+        "detail": "Upstream send failed: Client error '404 Not Found' for url 'https://cranky-lehmann4-279584.orak.nodeops.app/session/e636f8c8-ad1a-472d-b3a8-7c734407603c/message'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+      },
+      "ok": false,
+      "stage": "send",
+      "reason": "Upstream send failed: Client error '404 Not Found' for url 'https://cranky-lehmann4-279584.orak.nodeops.app/session/e636f8c8-ad1a-472d-b3a8-7c734407603c/message'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "created_at": "2026-02-12T15:46:42Z",
+  "token_file": "E:\\Program Files (x86)\\Visual Studio\\project\\dev\\deepseek\\orchids2api-main\\docs\\nodeopus-reserve\\nodeops_auth_token_auto.json",
+  "email": "hxungu75z6@dollicons.com",
+  "deployment_id": "7481d65f-45a6-4ddf-bc71-73b905b06591",
+  "server_endpoint": "https://gallant-meitner2-50717.syra.nodeops.app",
+  "sessions": {
+    "single_turn": "ses_3ad77cb54ffeMCM86KYV8ue1Dk",
+    "multi_turn": "ses_3ad77c6dfffeusnRPjkUbM35Zw",
+    "empty_only": "ses_3ad77c2ceffeQAgi1gFNhIXiuD"
+  },
+  "single_turn_last_assistant": "PONG_ONE",
+  "multi_turn_last_assistant": "MEMORY:ALPHA-42",
+  "multi_turn_messages": [
+    {
+      "id": "msg_c52885b13001Fb3E8YW5VliIRm",
+      "role": "user",
+      "completed": null,
+      "error": null,
+      "text": "Remember code ALPHA-42 and reply exactly MEMORY_SET"
+    },
+    {
+      "id": "msg_c52885b140015cGKff4FAkCn1R",
+      "role": "assistant",
+      "completed": 1770911195516,
+      "error": null,
+      "text": "MEMORY_SET"
+    },
+    {
+      "id": "msg_c52886a30001K2XoRSWfIn4CfA",
+      "role": "user",
+      "completed": null,
+      "error": null,
+      "text": "What code did I ask you to remember earlier? Reply exactly: MEMORY:<code>"
+    },
+    {
+      "id": "msg_c52886a320010uEqJ24pEEnbWJ",
+      "role": "assistant",
+      "completed": 1770911199442,
+      "error": null,
+      "text": "MEMORY:ALPHA-42"
+    }
+  ],
+  "empty_only_message_count": 0
+}

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NodeOps Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: ['JetBrains Mono', 'monospace'],
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              surface: {
+                0: '#0a0a0f',
+                1: '#12121a',
+                2: '#1a1a25',
+                3: '#222233',
+                4: '#2a2a3d',
+              },
+              accent: {
+                DEFAULT: '#00d4aa',
+                dim: '#00a888',
+                glow: '#00ffcc',
+              },
+              warn: '#ff6b4a',
+              info: '#4a9eff',
+            },
+          },
+        },
+      }
+    </script>
+    <style>
+      body { background: #0a0a0f; margin: 0; }
+      * { scrollbar-width: thin; scrollbar-color: #2a2a3d transparent; }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #2a2a3d; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #3a3a4d; }
+      @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 4px rgba(0,212,170,0.3); } 50% { box-shadow: 0 0 12px rgba(0,212,170,0.6); } }
+      .glow-pulse { animation: pulse-glow 2s ease-in-out infinite; }
+      @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      .animate-fade-in { animation: fade-in 0.2s ease-out; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
