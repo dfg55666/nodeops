@@ -361,7 +361,7 @@ function ProjectRow({ project }) {
   const [open, setOpen]     = useState(false);
   const [hovered, setHover] = useState(false);
 
-  const name     = project.name || project;
+  const name     = typeof project === 'string' ? project : (project.name || String(project.id || ''));
   const isActive = selectedNode?.type === 'project' && selectedNode.project === name;
   const taskList = tasks[name] || [];
 
@@ -612,9 +612,11 @@ export default function Sidebar() {
             {'no projects\n// create one below'}
           </div>
         ) : (
-          projects.map((p, i) => (
-            <ProjectRow key={p.name || i} project={p} />
-          ))
+          projects
+            .filter((p) => typeof p === 'string' ? true : Boolean(p && p.name))
+            .map((p, i) => (
+              <ProjectRow key={(typeof p === 'string' ? p : p.name) || i} project={p} />
+            ))
         )}
       </div>
 

@@ -34,13 +34,25 @@ def list_projects():
     for pdir in sorted(projects_path.iterdir()):
         if pdir.is_dir():
             pj = read_json(pdir / "project.json")
-            if pj:
-                # Count tasks
-                tasks_path = pdir / "tasks"
-                task_count = len(list(tasks_path.glob("*.json"))) if tasks_path.exists() else 0
-                pj["task_count"] = task_count
-                pj["repo_path"] = str(repo_dir(pj.get("name", pdir.name)))
-                projects.append(pj)
+            if not isinstance(pj, dict):
+                continue
+            # Guard against corrupted wrapper format {path, content, encoding}
+            if "content" in pj and "path" in pj and "name" not in pj:
+                import json as _json
+                try:
+                    pj = _json.loads(pj["content"])
+                    # Persist the fixed content
+                    write_json(pdir / "project.json", pj)
+                except Exception:
+                    continue
+            if not pj.get("name"):
+                continue
+            # Count tasks
+            tasks_path = pdir / "tasks"
+            task_count = len(list(tasks_path.glob("*.json"))) if tasks_path.exists() else 0
+            pj["task_count"] = task_count
+            pj["repo_path"] = str(repo_dir(pj.get("name", pdir.name)))
+            projects.append(pj)
     return {"success": True, "data": projects}
 
 
