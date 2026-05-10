@@ -50,15 +50,14 @@ def _auth_headers(auth_token: str) -> dict[str, str]:
     return {**COMMON_HEADERS, "X-Auth-Token": auth_token}
 
 
-def _runtime_headers(project_token: str, ygg_token: str) -> dict[str, str]:
+def _runtime_headers(project_token: str) -> dict[str, str]:
     # Runtime API requires x-project-token and y-gg-token.
-    # The frontend/runtime currently accepts different y-gg-token sources
-    # (project token or auth token) depending on route/runtime cluster.
+    # Align with upstream protocol: both headers always use project_token.
     return {
         "Content-Type": "application/json",
         "Accept": "*/*",
         "x-project-token": project_token,
-        "y-gg-token": ygg_token,
+        "y-gg-token": project_token,
     }
 
 
@@ -120,37 +119,6 @@ def _normalize_model_payload(model: Any) -> dict[str, str] | None:
     return None
 
 
-def _runtime_ygg_candidates(
-    project_token: str,
-    auth_token: str,
-    preferred_ygg: str | None = None,
-) -> list[str]:
-    candidates: list[str] = []
-    for raw in (preferred_ygg, auth_token, project_token):
-        token = str(raw or "").strip()
-        if token and token not in candidates:
-            candidates.append(token)
-    return candidates
-
-
-def _is_runtime_auth_failure(resp: httpx.Response) -> bool:
-    if resp.status_code in (401, 403):
-        return True
-    text = str(resp.text or "").lower()
-    if not text:
-        return False
-    return any(
-        marker in text
-        for marker in (
-            "failed jwt authentication",
-            "jwt not yet valid",
-            "wrong requirement_name",
-            "unauthorized",
-            "token",
-        )
-    )
-
-
 async def _runtime_request(
     method: str,
     runtime_host: str,
@@ -158,49 +126,18 @@ async def _runtime_request(
     auth_token: str,
     path: str,
     *,
-    preferred_ygg: str | None = None,
     retries: int = 3,
     **kwargs,
 ) -> httpx.Response:
     url = f"{_runtime_base(runtime_host)}{path}"
-    last_resp: httpx.Response | None = None
-    ygg_candidates = _runtime_ygg_candidates(project_token, auth_token, preferred_ygg)
-
-    if not ygg_candidates:
-        raise RuntimeError("No runtime token candidates available for y-gg-token")
-
-    for idx, ygg_token in enumerate(ygg_candidates):
-        resp = await _retry_request(
-            method,
-            url,
-            retries=retries,
-            headers=_runtime_headers(project_token, ygg_token),
-            **kwargs,
-        )
-        last_resp = resp
-
-        # Success path
-        if resp.status_code < 400:
-            return resp
-
-        # Retry with alternate y-gg-token only for auth-style failures.
-        has_next = idx < len(ygg_candidates) - 1
-        if has_next and _is_runtime_auth_failure(resp):
-            logger.warning(
-                "Runtime %s %s auth failed with y-gg candidate #%s (status=%s), trying alternate token",
-                method,
-                path,
-                idx + 1,
-                resp.status_code,
-            )
-            continue
-
-        return resp
-
-    # Should not happen because loop returns above, but keep safe.
-    if last_resp is None:
-        raise RuntimeError(f"Runtime request failed without response: {method} {url}")
-    return last_resp
+    _ = auth_token  # kept for call-site compatibility
+    return await _retry_request(
+        method,
+        url,
+        retries=retries,
+        headers=_runtime_headers(project_token),
+        **kwargs,
+    )
 
 
 async def _retry_request(method: str, url: str, retries: int = 3, **kwargs) -> httpx.Response:
@@ -423,7 +360,6 @@ async def create_session(
         project_token,
         auth_token,
         "/session",
-        preferred_ygg=project_token,
         json=body,
     )
     resp.raise_for_status()
@@ -439,7 +375,6 @@ async def list_sessions(runtime_host: str, project_token: str, auth_token: str) 
         project_token,
         auth_token,
         "/session",
-        preferred_ygg=project_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -487,7 +422,6 @@ async def send_message(
         project_token,
         auth_token,
         f"/session/{session_id}/message",
-        preferred_ygg=auth_token,
         json=body,
     )
     resp.raise_for_status()
@@ -507,7 +441,6 @@ async def get_messages(
         project_token,
         auth_token,
         f"/session/{session_id}/message",
-        preferred_ygg=auth_token,
         params={"_": int(time.time() * 1000)},
     )
     resp.raise_for_status()
@@ -527,7 +460,6 @@ async def get_session_context(
         project_token,
         auth_token,
         f"/session/{session_id}/context",
-        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -546,7 +478,6 @@ async def get_subagents(
         project_token,
         auth_token,
         f"/session/{session_id}/subagents",
-        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -565,7 +496,6 @@ async def abort_session(
         project_token,
         auth_token,
         f"/session/{session_id}/abort",
-        preferred_ygg=auth_token,
         json={},
     )
     resp.raise_for_status()
@@ -604,7 +534,6 @@ async def get_file_tree(
         project_token,
         auth_token,
         "/file",
-        preferred_ygg=auth_token,
         params={"path": path},
     )
     resp.raise_for_status()
@@ -624,7 +553,6 @@ async def get_file_content(
         project_token,
         auth_token,
         "/file/content",
-        preferred_ygg=auth_token,
         params={"path": path},
     )
     resp.raise_for_status()
@@ -638,7 +566,6 @@ async def get_file_status(runtime_host: str, project_token: str, auth_token: str
         project_token,
         auth_token,
         "/file/status",
-        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -663,7 +590,6 @@ async def request_preview(
         project_token,
         auth_token,
         "/preview",
-        preferred_ygg=auth_token,
         json={"port": port},
     )
     resp.raise_for_status()
