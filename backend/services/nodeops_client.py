@@ -50,14 +50,16 @@ def _auth_headers(auth_token: str) -> dict[str, str]:
     return {**COMMON_HEADERS, "X-Auth-Token": auth_token}
 
 
-def _runtime_headers(project_token: str) -> dict[str, str]:
+def _runtime_headers(project_token: str, ygg_token: str | None = None) -> dict[str, str]:
     # Runtime API requires x-project-token and y-gg-token.
-    # Align with upstream protocol: both headers always use project_token.
+    # Upstream behaviour (verified via network capture 2026-05-10):
+    #   /session (create/list, no sub-path) → y-gg-token = project_token
+    #   /session/{id}/*, /file*, /health     → y-gg-token = auth_token
     return {
         "Content-Type": "application/json",
         "Accept": "*/*",
         "x-project-token": project_token,
-        "y-gg-token": project_token,
+        "y-gg-token": ygg_token if ygg_token is not None else project_token,
     }
 
 
@@ -130,12 +132,16 @@ async def _runtime_request(
     **kwargs,
 ) -> httpx.Response:
     url = f"{_runtime_base(runtime_host)}{path}"
-    _ = auth_token  # kept for call-site compatibility
+    # Upstream token convention (verified via capture):
+    #   /session (no sub-path) → y-gg-token = project_token
+    #   everything else        → y-gg-token = auth_token
+    is_session_root = path in ("/session", "/session/")
+    ygg = project_token if is_session_root else auth_token
     return await _retry_request(
         method,
         url,
         retries=retries,
-        headers=_runtime_headers(project_token),
+        headers=_runtime_headers(project_token, ygg),
         **kwargs,
     )
 

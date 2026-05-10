@@ -265,7 +265,7 @@ def is_task_running(task_id: str) -> bool:
 
 
 async def create_empty_session(project_name: str, task_id: str) -> dict:
-    """Create an empty upstream session for a task without starting task loop."""
+    """Create an empty local session for a task without touching upstream runtime."""
     task = get_task(project_name, task_id)
     if not task:
         raise ValueError(f"Task {task_id} not found")
@@ -273,6 +273,7 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
     active_statuses = {
         "running", "monitoring", "pending", "switching",
         "syncing", "pushing", "acquiring_account", "auto_registering_account",
+        "bootstrapping_runtime", "creating_session", "sending_message",
     }
     if str(task.get("status") or "").lower() in active_statuses and is_task_running(task_id):
         raise ValueError("Task is running; stop it before creating a manual session")
@@ -311,22 +312,8 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
             "last_used_at": now_iso(),
         }) or account
 
-    deployment_info = await _ensure_deployment(account)
-    runtime_host = deployment_info["runtime_host"]
-    project_token = deployment_info["project_token"]
-
     next_session_index = int(task.get("session_index", 0)) + 1
-    session_data = await noc.create_session(
-        runtime_host, project_token, account["auth_token"],
-        title=f"{task_id} manual-{next_session_index}",
-    )
-    session_id = (
-        str(session_data.get("id") or "")
-        or str(session_data.get("sessionId") or "")
-        or str(session_data.get("session_id") or "")
-    ).strip()
-    if not session_id:
-        raise ValueError(f"session created but id missing: {session_data}")
+    session_id = f"local-{task_id}-{next_session_index}"
 
     used_ids = list(task.get("used_account_ids", []))
     if account["id"] not in used_ids:
@@ -334,8 +321,9 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
 
     update_task(project_name, task_id, {
         "current_account_id": account["id"],
-        "current_runtime_host": runtime_host,
-        "current_project_token": project_token,
+        # Empty local session does not create upstream deployment/session.
+        "current_runtime_host": None,
+        "current_project_token": None,
         "current_session_id": session_id,
         "session_index": next_session_index,
         "used_account_ids": used_ids,
@@ -357,7 +345,7 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
     })
 
     logger.info(
-        "Task %s created manual empty session %s using account %s",
+        "Task %s created local empty session %s using account %s",
         task_id, session_id, account["email"],
     )
     return {
@@ -436,17 +424,21 @@ async def _task_loop(project_name: str, task_id: str):
 
             update_task(project_name, task_id, {
                 "current_account_id": account["id"],
+                "status": "bootstrapping_runtime",
+                "error": None,
             })
 
             # ── Step 2: Ensure deployment ──
             try:
-                deployment_info = await _ensure_deployment(account)
+                deployment_info = await ensure_task_runtime_for_send(
+                    project_name,
+                    task_id,
+                    account["id"],
+                    prompt=str(task.get("message") or "").strip(),
+                    force_new=True,
+                )
                 runtime_host = deployment_info["runtime_host"]
                 project_token = deployment_info["project_token"]
-                update_task(project_name, task_id, {
-                    "current_runtime_host": runtime_host,
-                    "current_project_token": project_token,
-                })
             except Exception as e:
                 logger.error(f"Task {task_id}: deployment failed: {e}")
                 account_pool.release_account(account["id"])
@@ -458,6 +450,7 @@ async def _task_loop(project_name: str, task_id: str):
 
             # ── Step 3: Create session ──
             try:
+                update_task(project_name, task_id, {"status": "creating_session"})
                 loop_index = int(task.get("loop_count", 0)) + 1
                 session_data = await noc.create_session(
                     runtime_host, project_token, account["auth_token"],
@@ -501,6 +494,7 @@ async def _task_loop(project_name: str, task_id: str):
 
             # ── Step 4: Send message ──
             try:
+                update_task(project_name, task_id, {"status": "sending_message"})
                 await noc.send_message(
                     runtime_host, project_token, account["auth_token"],
                     session_id, task["message"],
@@ -597,7 +591,12 @@ async def _task_loop(project_name: str, task_id: str):
 
     except asyncio.CancelledError:
         logger.info(f"Task {task_id} was canceled")
-        update_task(project_name, task_id, {"status": "canceled"})
+        _release_task_account_lock(project_name, task_id)
+        update_task(project_name, task_id, {
+            "status": "canceled",
+            "current_account_id": None,
+            "current_session_id": None,
+        })
     except Exception as e:
         logger.error(f"Task {task_id} unexpected error: {e}", exc_info=True)
         update_task(project_name, task_id, {
@@ -605,15 +604,70 @@ async def _task_loop(project_name: str, task_id: str):
             "error": str(e),
         })
     finally:
+        _release_task_account_lock(project_name, task_id)
         _active_tasks.pop(task_id, None)
         _stop_events.pop(task_id, None)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
-async def _ensure_deployment(account: dict) -> dict:
-    """Make sure an account has an active deployment. Returns {runtime_host, project_token}."""
+async def ensure_task_runtime_for_send(
+    project_name: str,
+    task_id: str,
+    account_id: str,
+    prompt: str | None = None,
+    force_new: bool = False,
+) -> dict:
+    """
+    Ensure task runtime exists for an outbound message.
+    If task has no runtime context, create a fresh deployment with prompt.
+    """
+    task = get_task(project_name, task_id)
+    if not task:
+        raise ValueError("Task not found")
+
+    account = account_pool.get_account(account_id)
+    if not account:
+        raise ValueError("Account not found")
+
+    runtime_host = str(task.get("current_runtime_host") or "").strip()
+    project_token = str(task.get("current_project_token") or "").strip()
+    if runtime_host and project_token and not force_new:
+        return {"runtime_host": runtime_host, "project_token": project_token}
+
+    dep = await _ensure_deployment(account, prompt=prompt)
+    runtime_host = dep["runtime_host"]
+    project_token = dep["project_token"]
+    update_task(project_name, task_id, {
+        "current_account_id": account_id,
+        "current_runtime_host": runtime_host,
+        "current_project_token": project_token,
+    })
+    return {"runtime_host": runtime_host, "project_token": project_token}
+
+
+async def _wait_runtime_healthy(runtime_host: str, timeout: float = 60.0, interval: float = 3.0):
+    """Poll GET /health until {"ok":true} or timeout."""
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            data = await noc.get_health(runtime_host)
+            if isinstance(data, dict) and data.get("ok"):
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+    logger.warning("Runtime %s did not become healthy within %ss", runtime_host, timeout)
+
+
+async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
+    """
+    Create a fresh deployment for this session.
+    Returns {runtime_host, project_token}.
+    """
     auth_token = account["auth_token"]
+    create_prompt = str(prompt or "").strip() or "init"
 
     def _pick_runtime_host(detail: dict) -> str:
         host = (
@@ -642,66 +696,30 @@ async def _ensure_deployment(account: dict) -> dict:
     def _as_dict(data: object) -> dict:
         return data if isinstance(data, dict) else {}
 
-    # If account already has deployment info, verify it with an authenticated
-    # runtime call. `/health` may return 401 on some runtime clusters even when
-    # runtime is usable.
-    if account.get("runtime_host") and account.get("project_token"):
-        try:
-            await noc.list_sessions(
-                account["runtime_host"],
-                account["project_token"],
-                auth_token,
-            )
-            return {
-                "runtime_host": account["runtime_host"],
-                "project_token": account["project_token"],
-            }
-        except Exception as e:
-            logger.info(
-                "Existing deployment validation failed for %s, creating new: %s",
-                account["email"],
-                e,
-            )
-
-    # List existing deployments
-    deployments_payload = await noc.list_deployments(auth_token)
-    deploy_list: list[dict] = []
-    if isinstance(deployments_payload, list):
-        deploy_list = [x for x in deployments_payload if isinstance(x, dict)]
-    elif isinstance(deployments_payload, dict):
-        payload_data = _as_dict(deployments_payload.get("data")) if "data" in deployments_payload else deployments_payload
-        raw_list = payload_data.get("deployments") or payload_data.get("items") or payload_data.get("list") or []
-        if isinstance(raw_list, list):
-            deploy_list = [x for x in raw_list if isinstance(x, dict)]
-
-    if deploy_list:
-        dep = deploy_list[0]
-        dep_id = _pick_deployment_id(dep)
-        runtime_host = _pick_runtime_host(dep)
-        project_token = _pick_project_token(dep)
-
-        # If list item misses runtime/token, fetch detail.
-        if dep_id and (not runtime_host or not project_token):
-            dep_detail_payload = await noc.get_deployment(auth_token, dep_id)
-            dep_detail = dep_detail_payload if isinstance(dep_detail_payload, dict) else {}
-            runtime_host = runtime_host or _pick_runtime_host(dep_detail)
-            project_token = project_token or _pick_project_token(dep_detail)
-
-        if runtime_host and project_token:
-            account_pool.update_account(account["id"], {
-                "deployment_id": dep_id,
-                "runtime_host": runtime_host,
-                "project_token": project_token,
-            })
-            return {"runtime_host": runtime_host, "project_token": project_token}
-
-    # Create new deployment
-    new_dep_payload = await noc.create_deployment(auth_token)
+    # Always create a new deployment per session using the outgoing prompt.
+    new_dep_payload = await noc.create_deployment(auth_token, prompt=create_prompt)
     new_dep = new_dep_payload if isinstance(new_dep_payload, dict) else {}
+    if not new_dep:
+        new_dep = _as_dict(new_dep_payload.get("data")) if isinstance(new_dep_payload, dict) else {}
+
     dep_id = _pick_deployment_id(new_dep)
+    runtime_host = _pick_runtime_host(new_dep)
+    project_token = _pick_project_token(new_dep)
+
+    if runtime_host and project_token:
+        await _wait_runtime_healthy(runtime_host)
+        return {"runtime_host": runtime_host, "project_token": project_token}
+
     if not dep_id and isinstance(new_dep_payload, dict):
         nested = _as_dict(new_dep_payload.get("data"))
         dep_id = _pick_deployment_id(nested)
+        runtime_host = runtime_host or _pick_runtime_host(nested)
+        project_token = project_token or _pick_project_token(nested)
+
+    if runtime_host and project_token:
+        await _wait_runtime_healthy(runtime_host)
+        return {"runtime_host": runtime_host, "project_token": project_token}
+
     if not dep_id:
         raise Exception(f"No deployment ID in response: {new_dep_payload}")
 
@@ -713,11 +731,7 @@ async def _ensure_deployment(account: dict) -> dict:
         project_token = _pick_project_token(dep_detail)
 
         if runtime_host and project_token:
-            account_pool.update_account(account["id"], {
-                "deployment_id": dep_id,
-                "runtime_host": runtime_host,
-                "project_token": project_token,
-            })
+            await _wait_runtime_healthy(runtime_host)
             return {"runtime_host": runtime_host, "project_token": project_token}
 
         await asyncio.sleep(5.0)
@@ -767,7 +781,6 @@ async def _auto_register_one_account(task_id: str) -> bool:
         )
         rcfg = RegisterConfig(
             redeem_credits=False,
-            create_runtime=True,
         )
         res = await gmail_auto_register(
             target_email=alias,
@@ -1112,6 +1125,24 @@ def _emit_task_event(task_id: str, event_type: str, data: dict[str, Any]):
     buf.append(event)
     if len(buf) > _EVENT_BUFFER_LIMIT:
         del buf[:-_EVENT_BUFFER_LIMIT]
+
+
+def _release_task_account_lock(project_name: str, task_id: str):
+    """Best-effort lock cleanup for stale/canceled task states."""
+    task = get_task(project_name, task_id)
+    if not task:
+        return
+    account_id = str(task.get("current_account_id") or "").strip()
+    if not account_id:
+        return
+    account = account_pool.get_account(account_id)
+    if not account:
+        return
+    if str(account.get("locked_by_task") or "").strip() == task_id:
+        try:
+            account_pool.release_account(account_id)
+        except Exception as exc:
+            logger.warning("Failed releasing account lock for task %s: %s", task_id, exc)
 
 
 def _payload_indicates_credit_exhausted(payload: Any) -> bool:

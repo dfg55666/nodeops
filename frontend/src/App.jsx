@@ -216,7 +216,11 @@ export default function App() {
       projectNames.forEach((pName) => {
         const taskList = tasks[pName] || [];
         const hasActive = taskList.some((t) =>
-          ['running', 'pending', 'monitoring', 'switching', 'syncing', 'pushing'].includes(t.status)
+          [
+            'running', 'pending', 'monitoring', 'switching', 'syncing', 'pushing',
+            'acquiring_account', 'auto_registering_account',
+            'bootstrapping_runtime', 'creating_session', 'sending_message',
+          ].includes(t.status)
         );
         if (hasActive) fetchTasks(pName);
       });

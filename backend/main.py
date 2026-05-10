@@ -89,6 +89,20 @@ def overview():
     projects_path = DATA_DIR / "projects"
     project_count = sum(1 for p in projects_path.iterdir() if p.is_dir()) if projects_path.exists() else 0
 
+    active_statuses = {
+        "running",
+        "pending",
+        "monitoring",
+        "switching",
+        "syncing",
+        "pushing",
+        "acquiring_account",
+        "auto_registering_account",
+        "bootstrapping_runtime",
+        "creating_session",
+        "sending_message",
+    }
+
     return {
         "success": True,
         "data": {
@@ -97,7 +111,7 @@ def overview():
             "accounts_exhausted": sum(1 for a in all_accounts if a.get("status") == "exhausted"),
             "projects_total": project_count,
             "tasks_total": len(all_tasks),
-            "tasks_running": sum(1 for t in all_tasks if t.get("status") == "running"),
+            "tasks_running": sum(1 for t in all_tasks if str(t.get("status") or "").lower() in active_statuses),
             "tasks_completed": sum(1 for t in all_tasks if t.get("status") == "completed"),
         }
     }

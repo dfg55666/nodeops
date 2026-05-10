@@ -88,6 +88,24 @@ function parseRuntimePayload(payload, eventName = '') {
     const msg = String(err.message || 'session error');
     return [{ role: 'system', text: `[error${status}] ${msg}` }];
   }
+  if (typeLower === 'session.idle') return [];
+  // Upstream SSE: message.part.updated → properties.part contains the part object
+  if (typeLower === 'message.part.updated') {
+    const part = props.part;
+    if (!part || typeof part !== 'object') return [];
+    const partType = String(part.type || '').trim().toLowerCase();
+    if (partType === 'text') {
+      const txt = String(part.text ?? props.delta ?? '').trim();
+      if (txt) return [{ role: 'assistant', text: txt }];
+    }
+    if (partType === 'step-finish') return [];
+    if (partType.includes('tool') || partType === 'function') {
+      const name = part.name || part.toolName || 'tool';
+      return [{ role: 'system', text: `[tool ${name}]` }];
+    }
+    return [];
+  }
+  if (typeLower === 'message.completed') return [];
 
   const messageObj =
     (payload.message && typeof payload.message === 'object' ? payload.message : null)
@@ -136,6 +154,21 @@ function parseRuntimePayload(payload, eventName = '') {
     return [{ role: 'system', text: `[${type}]` }];
   }
   return [{ role: 'system', text: JSON.stringify(payload) }];
+}
+
+// ─── Parse upstream GET /session/{id}/message JSON array ─────────────────────
+// Each element: { info: { role, id, ... }, parts: [{ type:"text", text:"..." }, ...] }
+function parseRuntimeMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  const out = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    const role = normalizeRole(msg?.info?.role) || 'assistant';
+    const { text, tools } = extractTextFromParts(msg.parts);
+    if (text) out.push({ role, text });
+    for (const t of tools) out.push({ role: 'system', text: t });
+  }
+  return out;
 }
 
 // ─── Parse raw session .md content into segments ──────────────────────────────
@@ -760,9 +793,11 @@ function SessionComposer({
   const textareaRef = useRef(null);
 
   const hasContent = Boolean(text.trim() || imageDataUrl);
-  const canSend = Boolean(sessionId && accountId && !sending && hasContent);
+  const taskBound = Boolean(projectName && taskId);
+  const hasSessionContext = Boolean(sessionId) || taskBound;
+  const canSend = Boolean(hasSessionContext && accountId && !sending && hasContent);
 
-  const disabledReason = !sessionId
+  const disabledReason = !hasSessionContext
     ? 'Session ID 缺失 — 请从历史记录文件中选择会话'
     : !accountId
     ? '账户未匹配 — 无法在账户池中找到对应账户（需要 runtime_host 和 project_token）'
@@ -801,10 +836,10 @@ function SessionComposer({
       if (disabledReason) showToast(disabledReason, 'error');
       return;
     }
-    setLastError('');
+      setLastError('');
     try {
       setSending(true);
-      await api.sendSessionMessage(sessionId, accountId, {
+      await api.sendSessionMessage(sessionId || 'local-pending', accountId, {
         text: text.trim() || null,
         image_url: imageDataUrl || null,
         image_mime: imageMime || null,
@@ -891,7 +926,7 @@ function SessionComposer({
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
         placeholder={
-          !sessionId
+          !hasSessionContext
             ? '⚠ 无 Session ID，无法发送'
             : !accountId
             ? '⚠ 账户未匹配，无法发送'
@@ -909,7 +944,7 @@ function SessionComposer({
           fontFamily: 'Inter, sans-serif',
           fontSize: 13,
           color: '#1e293b',
-          background: (!sessionId || !accountId) ? '#f8fafc' : '#ffffff',
+          background: (!hasSessionContext || !accountId) ? '#f8fafc' : '#ffffff',
           lineHeight: 1.6,
           transition: 'border-color 0.15s',
         }}
@@ -1083,6 +1118,10 @@ function LiveMessages({ project, taskId }) {
 
     const rowsFromTaskMessage = (msg) => {
       if (!msg || typeof msg !== 'object') return [];
+      // Upstream format: { info: { role }, parts: [...] }
+      if (msg.info && Array.isArray(msg.parts)) {
+        return parseRuntimePayload(msg);
+      }
       const role = normalizeRole(msg.role);
       const text = String(msg.content || msg.message || msg.text || '').trim();
       if (text) return [{ role: role || 'assistant', text }];
@@ -1263,7 +1302,11 @@ export default function SessionView() {
 
   const taskList = tasks[project] || [];
   const task = taskList.find((t) => (t.id || t.task_id || t.taskId) === taskId);
-  const isLive = task && ['running', 'monitoring'].includes(task.status);
+  const isLive = task && [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(task.status);
 
   const loadContent = useCallback(async () => {
     if (!project || !taskId || !sessionFile) return;
@@ -1308,7 +1351,7 @@ export default function SessionView() {
   const headerAccountEmail = extractHeaderValue(rawContent, 'Account');
   const effectiveAccountEmail = accountEmail || headerAccountEmail;
   const headerSessionId = extractHeaderValue(rawContent, 'NodeOps Session ID');
-  const effectiveSessionId = selectedSessionId || headerSessionId;
+  const effectiveSessionId = headerSessionId || selectedSessionId;
 
   const matchedAccount = (accounts || []).find((a) => a.email === effectiveAccountEmail);
   const effectiveAccountId = matchedAccount?.id || task?.current_account_id || '';

@@ -57,7 +57,6 @@ class VerifyRequest(BaseModel):
     redeem_credits: bool = False
     redeem_amount: int = 400
     redeem_chunk: int = 100
-    create_runtime: bool = True
     save_to_pool: bool = True
 
 
@@ -81,7 +80,6 @@ class GmailAutoRequest(BaseModel):
     redeem_credits: bool = False
     redeem_amount: int = 400
     redeem_chunk: int = 100
-    create_runtime: bool = True
     save_to_pool: bool = True
 
 
@@ -102,7 +100,6 @@ class GmailBatchRequest(BaseModel):
     redeem_credits: bool = False
     redeem_amount: int = 400
     redeem_chunk: int = 100
-    create_runtime: bool = True
     save_to_pool: bool = True
 
 
@@ -139,13 +136,11 @@ def _gmail_cfg(req_email: str, req_pw: str, req_proxy_host: str,
     )
 
 
-def _reg_cfg(redeem: bool, amount: int, chunk: int,
-             create_rt: bool) -> RegisterConfig:
+def _reg_cfg(redeem: bool, amount: int, chunk: int) -> RegisterConfig:
     return RegisterConfig(
         redeem_credits=redeem,
         redeem_amount_nodeops=amount,
         redeem_chunk_nodeops=chunk,
-        create_runtime=create_rt,
     )
 
 
@@ -175,7 +170,7 @@ async def api_verify(req: VerifyRequest):
     Verify OTP manually and run the full registration flow
     (redeem credits + bootstrap runtime + save to pool).
     """
-    cfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk, req.create_runtime)
+    cfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk)
     try:
         result = await register_account(
             email=req.email.strip(),
@@ -207,7 +202,7 @@ async def api_gmail_auto(req: GmailAutoRequest):
         poll_interval_s=req.poll_interval_s,
         otp_timeout_s=req.otp_timeout_s,
     )
-    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk, req.create_runtime)
+    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk)
 
     try:
         result = await gmail_auto_register(
@@ -243,7 +238,7 @@ async def api_gmail_batch(req: GmailBatchRequest):
         poll_interval_s=req.poll_interval_s,
         otp_timeout_s=req.otp_timeout_s,
     )
-    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk, req.create_runtime)
+    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk)
 
     try:
         results = await batch_gmail_register(
@@ -293,7 +288,7 @@ async def api_gmail_batch_stream(req: GmailBatchRequest):
         poll_interval_s=req.poll_interval_s,
         otp_timeout_s=req.otp_timeout_s,
     )
-    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk, req.create_runtime)
+    rcfg = _reg_cfg(req.redeem_credits, req.redeem_amount, req.redeem_chunk)
 
     q: asyncio.Queue[dict | None] = asyncio.Queue()
 

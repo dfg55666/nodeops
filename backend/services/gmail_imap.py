@@ -39,6 +39,9 @@ KEYWORDS = (
     "sign in",
     "验证码",
 )
+OTP_PRIMARY_SENDER = "otp@reachout.nodeops.network"
+OTP_SENDER_DOMAIN = "reachout.nodeops.network"
+ALIAS_RECENT_SCAN_LIMIT = 8
 
 
 def _decode_mime(value: str) -> str:
@@ -235,6 +238,68 @@ class GmailIMAPInbox:
 
         raise RuntimeError(f"IMAP connection/login failed: {last_exc}") from last_exc
 
+    def _imap_search_ids(self, imap: imaplib.IMAP4_SSL, *criteria: str) -> list[bytes]:
+        """Run IMAP SEARCH and return matched IDs (empty on failure)."""
+        try:
+            typ, data = imap.search(None, *criteria)
+        except Exception as exc:
+            logger.debug("IMAP search failed criteria=%s err=%s", criteria, exc)
+            return []
+        if typ != "OK" or not data or not data[0]:
+            return []
+        try:
+            return list(data[0].split())
+        except Exception:
+            return []
+
+    def _collect_candidate_ids(
+        self,
+        imap: imaplib.IMAP4_SSL,
+        cutoff: datetime,
+        to_email_contains: str,
+    ) -> list[bytes]:
+        """
+        Collect message IDs with server-side IMAP search first.
+        Prioritizes NodeOps OTP sender to avoid scanning unrelated emails.
+        """
+        since_token = cutoff.strftime("%d-%b-%Y")
+        to_filter = str(to_email_contains or "").strip()
+
+        search_plans: list[tuple[str, ...]] = []
+        if to_filter:
+            search_plans.append(("FROM", f"\"{OTP_PRIMARY_SENDER}\"", "TO", f"\"{to_filter}\"", "SINCE", since_token))
+            search_plans.append(("TO", f"\"{to_filter}\"", "SINCE", since_token))
+        else:
+            search_plans.append(("FROM", f"\"{OTP_PRIMARY_SENDER}\"", "SINCE", since_token))
+            search_plans.append(("FROM", f"\"{OTP_SENDER_DOMAIN}\"", "SINCE", since_token))
+
+        collected: list[bytes] = []
+        seen: set[bytes] = set()
+        for criteria in search_plans:
+            ids = self._imap_search_ids(imap, *criteria)
+            for msg_id in ids:
+                if msg_id in seen:
+                    continue
+                seen.add(msg_id)
+                collected.append(msg_id)
+            # Sender+alias exact hit is enough; stop early to reduce latency.
+            if collected and criteria[:2] == ("FROM", f"\"{OTP_PRIMARY_SENDER}\"") and "TO" in criteria:
+                break
+
+        if to_filter and collected:
+            # Alias workflow only needs the latest few matches for this exact
+            # recipient; avoid scanning deep history.
+            collected = collected[-ALIAS_RECENT_SCAN_LIMIT:]
+
+        # Compatibility fallback (no alias filter only): if strict sender
+        # searches return nothing, sample only recent messages.
+        if not collected and not to_filter:
+            recent_ids = self._imap_search_ids(imap, "SINCE", since_token)
+            if recent_ids:
+                collected = recent_ids[-max(10, min(self.max_mails, 30)):]
+
+        return collected
+
     def fetch_latest_code_sync(
         self,
         to_email_contains: str = "",
@@ -252,11 +317,15 @@ class GmailIMAPInbox:
             return GmailIMAPFetchResult(ok=False, error=str(exc))
 
         try:
-            typ, data = imap.search(None, "ALL")
-            if typ != "OK" or not data or not data[0]:
-                return GmailIMAPFetchResult(ok=False, error="No messages found in inbox")
+            ids = self._collect_candidate_ids(
+                imap=imap,
+                cutoff=cutoff,
+                to_email_contains=to_email_contains,
+            )
+            if not ids:
+                imap.logout()
+                return GmailIMAPFetchResult(ok=False, error="No candidate verification emails found")
 
-            ids = data[0].split()
             ids = ids[-self.max_mails:]
             ids.reverse()  # newest first
 

@@ -12,11 +12,16 @@ function statusStyle(status) {
   switch (status) {
     case 'running':
     case 'monitoring':
+    case 'bootstrapping_runtime':
+    case 'creating_session':
+    case 'sending_message':
       return { color: '#00a888', borderColor: 'rgba(0,168,136,0.3)', bg: 'rgba(0,168,136,0.08)' };
     case 'pending':
     case 'switching':
     case 'syncing':
     case 'pushing':
+    case 'acquiring_account':
+    case 'auto_registering_account':
       return { color: '#f59e0b', borderColor: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)' };
     case 'failed':
     case 'blocked':
@@ -37,11 +42,16 @@ function StatusIcon({ status }) {
   switch (status) {
     case 'running':
     case 'monitoring':
+    case 'bootstrapping_runtime':
+    case 'creating_session':
+    case 'sending_message':
       return <Play size={sz} style={{ color: '#00a888', flexShrink: 0 }} />;
     case 'pending':
     case 'switching':
     case 'syncing':
     case 'pushing':
+    case 'acquiring_account':
+    case 'auto_registering_account':
       return <Clock size={sz} style={{ color: '#f59e0b', flexShrink: 0 }} />;
     case 'failed':
     case 'blocked':
@@ -67,7 +77,11 @@ function TaskRow({ task, projectName }) {
   const loops     = task.current_loop ?? task.loop_count ?? 0;
   const maxL      = task.max_loops ?? '∞';
   const st        = statusStyle(status);
-  const isActive  = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'].includes(status);
+  const isActive  = [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(status);
 
   return (
     <button
@@ -173,8 +187,12 @@ export default function ProjectView() {
     if (projectName) fetchTasks(projectName);
   }, [projectName]);
 
-  const runningCount  = taskList.filter((t) => ['running', 'monitoring'].includes(t.status)).length;
-  const pendingCount  = taskList.filter((t) => ['pending', 'switching', 'syncing', 'pushing'].includes(t.status)).length;
+  const runningCount  = taskList.filter((t) =>
+    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message'].includes(t.status)
+  ).length;
+  const pendingCount  = taskList.filter((t) =>
+    ['pending', 'switching', 'syncing', 'pushing', 'acquiring_account', 'auto_registering_account'].includes(t.status)
+  ).length;
   const failedCount   = taskList.filter((t) => ['failed', 'blocked', 'blocked_no_account'].includes(t.status)).length;
   const completedCount = taskList.filter((t) => ['completed', 'stopped'].includes(t.status)).length;
 

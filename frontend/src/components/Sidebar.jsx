@@ -14,10 +14,15 @@ function StatusDot({ status, size = 7 }) {
   const map = {
     running:            { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.8)' },
     monitoring:         { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
+    bootstrapping_runtime: { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
+    creating_session:   { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
+    sending_message:    { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
     pending:            { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.6)' },
     switching:          { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.5)' },
     syncing:            { color: '#4a9eff', glow: '0 0 4px rgba(74,158,255,0.5)' },
     pushing:            { color: '#4a9eff', glow: '0 0 4px rgba(74,158,255,0.5)' },
+    acquiring_account:  { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.5)' },
+    auto_registering_account: { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.5)' },
     blocked:            { color: '#ff6b4a', glow: '0 0 4px rgba(255,107,74,0.5)' },
     blocked_no_account: { color: '#ff6b4a', glow: '0 0 4px rgba(255,107,74,0.5)' },
     failed:             { color: '#ff6b4a', glow: '0 0 4px rgba(255,107,74,0.5)' },
@@ -27,7 +32,11 @@ function StatusDot({ status, size = 7 }) {
     idle:               { color: '#94a3b8', glow: 'none' },
   };
   const s = map[status] || map.idle;
-  const isActive = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'].includes(status);
+  const isActive = [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(status);
   return (
     <span
       style={{
@@ -50,11 +59,16 @@ function TaskStatusIcon({ status }) {
   switch (status) {
     case 'running':
     case 'monitoring':
+    case 'bootstrapping_runtime':
+    case 'creating_session':
+    case 'sending_message':
       return <Play size={sz} style={{ color: '#00a888', flexShrink: 0 }} />;
     case 'pending':
     case 'switching':
     case 'syncing':
     case 'pushing':
+    case 'acquiring_account':
+    case 'auto_registering_account':
       return <Clock size={sz} style={{ color: '#f59e0b', flexShrink: 0 }} />;
     case 'blocked':
     case 'blocked_no_account':
@@ -220,7 +234,11 @@ function TaskRow({ task, project, baseIndent }) {
   const isActive = selectedNode?.type === 'task'
     && selectedNode.project === project
     && selectedNode.taskId === taskId;
-  const isRunning = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'].includes(status);
+  const isRunning = [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(status);
 
   const subIndent = baseIndent + 18;
 
@@ -371,10 +389,10 @@ function ProjectRow({ project }) {
   };
 
   const runningCount = taskList.filter((t) =>
-    ['running', 'monitoring'].includes(t.status)
+    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message'].includes(t.status)
   ).length;
   const pendingCount = taskList.filter((t) =>
-    ['pending', 'switching', 'syncing', 'pushing'].includes(t.status)
+    ['pending', 'switching', 'syncing', 'pushing', 'acquiring_account', 'auto_registering_account'].includes(t.status)
   ).length;
 
   return (

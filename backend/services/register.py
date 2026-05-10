@@ -6,9 +6,7 @@ Full flow:
   2. Fetch OTP → Gmail IMAP (via GmailIMAPInbox) or manual input
   3. Verify    → POST /api/v1/login/verify  → get X-Auth-Token
   4. (optional) Redeem credits  → POST /v1/credits/openrouter
-  5. (optional) Create deployment → POST /api/v1/deployments/pi-agent
-  6. (optional) Create session    → POST /session
-  7. Save account to pool
+  5. Save account to pool
 
 Supports:
   - Single manual (provide email + otp)
@@ -74,9 +72,6 @@ class RegisterConfig:
     redeem_credits: bool = False
     redeem_amount_nodeops: int = 400      # NodeOps credits to redeem
     redeem_chunk_nodeops: int = 100       # chunk size (100 or 250)
-    # Whether to create deployment + session after registration
-    create_runtime: bool = True
-    deployment_prompt: str = "init"
     # HTTP timeout for individual API calls
     http_timeout_s: int = 60
 
@@ -406,7 +401,7 @@ async def _create_session(
         "Content-Type": "application/json",
         "Accept": "*/*",
         "x-project-token": project_token,
-        "y-gg-token": auth_token,
+        "y-gg-token": project_token,
     }
     session_url = f"{server_endpoint}/session"
     max_attempts = 8
@@ -561,7 +556,7 @@ async def register_account(
 ) -> RegisterResult:
     """
     Given email + OTP (already fetched), run:
-      verify → (redeem credits) → (bootstrap runtime) → save to pool.
+      verify → (redeem credits) → save to pool.
     """
     result = RegisterResult(ok=False, email=email)
 
@@ -626,59 +621,29 @@ async def register_account(
             await _emit_log(log_hook, "warning", "Credit redeem failed", email=email, error=str(exc))
             result.detail["redeem_error"] = str(exc)
 
-    # ── Bootstrap runtime (optional) ──────────────────────────────────────
-    if cfg.create_runtime:
-        await _emit_log(log_hook, "info", "Creating runtime deployment/session", email=email)
-        rt = await bootstrap_runtime(auth_token=token, timeout=cfg.http_timeout_s)
-        result.deployment_id = rt.get("deployment_id", "")
-        result.runtime_host = rt.get("runtime_host", "")
-        result.project_token = rt.get("project_token", "")
-        result.session_id = rt.get("session_id", "")
-        result.runtime_ready = rt.get("ok", False)
-        result.detail["runtime"] = rt
-        await _emit_log(
-            log_hook,
-            "success" if rt.get("ok") else "warning",
-            "Runtime bootstrap finished",
-            email=email,
-            ok=bool(rt.get("ok")),
-            deployment_id=result.deployment_id,
-            session_id=result.session_id,
-            error=rt.get("error", ""),
-        )
-        if not rt["ok"]:
-            logger.warning("[register] runtime bootstrap failed for %s: %s", email, rt.get("error"))
-
     # ── Save to account pool ───────────────────────────────────────────────
     if save_to_pool:
         try:
             # Upsert: update if exists, add if not
             existing = account_pool.get_account_by_email(email)
             if existing:
-                updates: dict[str, Any] = {"auth_token": token}
-                if result.deployment_id:
-                    updates["deployment_id"] = result.deployment_id
-                if result.runtime_host:
-                    updates["runtime_host"] = result.runtime_host
-                if result.project_token:
-                    updates["project_token"] = result.project_token
-                if result.session_id:
-                    updates["session_id"] = result.session_id
-                updates["status"] = "available"
+                updates: dict[str, Any] = {
+                    "auth_token": token,
+                    "status": "available",
+                    # Do not cache deployment/session at registration time.
+                    "deployment_id": "",
+                    "runtime_host": "",
+                    "project_token": "",
+                    "session_id": None,
+                }
                 account_pool.update_account(existing["id"], updates)
                 result.account_id = existing["id"]
             else:
                 acc = account_pool.add_account(
                     email=email,
                     auth_token=token,
-                    deployment_id=result.deployment_id,
-                    runtime_host=result.runtime_host,
-                    project_token=result.project_token,
                 )
                 result.account_id = acc["id"]
-                # store session_id too if present
-                if result.session_id:
-                    account_pool.update_account(acc["id"], {"session_id": result.session_id})
             logger.info("[register] saved account %s id=%s", email, result.account_id)
             await _emit_log(log_hook, "success", "Account saved to pool", email=email, account_id=result.account_id)
         except Exception as exc:

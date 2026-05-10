@@ -21,7 +21,11 @@ export default function StatusBar() {
   const totalAccounts     = overview.total_accounts     ?? accounts.length;
   const availableAccounts = overview.available_accounts ?? accounts.filter((a) => a.status === 'available').length;
   const runningTasks      = overview.running_tasks      ?? Object.values(tasks).flat().filter((t) =>
-    ['running', 'monitoring'].includes(t.status)
+    [
+      'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+      'acquiring_account', 'auto_registering_account',
+      'bootstrapping_runtime', 'creating_session', 'sending_message',
+    ].includes(t.status)
   ).length;
   const totalTasks        = overview.total_tasks        ?? Object.values(tasks).flat().length;
 

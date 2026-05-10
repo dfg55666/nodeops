@@ -15,10 +15,15 @@ import { showToast } from './Toast';
 const STATUS_CONFIG = {
   running:            { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'running' },
   monitoring:         { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'monitoring' },
+  bootstrapping_runtime: { text: '#00a888', border: 'rgba(0,168,136,0.3)', bg: 'rgba(0,168,136,0.08)', label: 'runtime bootstrapping' },
+  creating_session:   { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'creating session' },
+  sending_message:    { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'sending message' },
   pending:            { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'pending' },
   switching:          { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'switching' },
   syncing:            { text: '#4a9eff', border: 'rgba(74,158,255,0.3)', bg: 'rgba(74,158,255,0.08)', label: 'syncing' },
   pushing:            { text: '#4a9eff', border: 'rgba(74,158,255,0.3)', bg: 'rgba(74,158,255,0.08)', label: 'pushing' },
+  acquiring_account:  { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'acquiring account' },
+  auto_registering_account: { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'auto registering account' },
   blocked:            { text: '#ff6b4a', border: 'rgba(255,107,74,0.3)', bg: 'rgba(255,107,74,0.08)', label: 'blocked' },
   blocked_no_account: { text: '#ff6b4a', border: 'rgba(255,107,74,0.3)', bg: 'rgba(255,107,74,0.08)', label: 'no accounts' },
   failed:             { text: '#ff6b4a', border: 'rgba(255,107,74,0.3)', bg: 'rgba(255,107,74,0.08)', label: 'failed' },
@@ -326,7 +331,11 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
   const maxL    = task.max_loops ?? '∞';
   const message = task.message || task.prompt || '';
   const loopHistory = task.loops || task.loop_results || task.completed_loops || [];
-  const isActive = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'].includes(status);
+  const isActive = [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(status);
 
   const act = async (fn, label) => {
     try {
@@ -553,7 +562,11 @@ export default function TaskView() {
   // Poll while active
   useEffect(() => {
     clearInterval(pollRef.current);
-    const activeStatuses = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'];
+    const activeStatuses = [
+      'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+      'acquiring_account', 'auto_registering_account',
+      'bootstrapping_runtime', 'creating_session', 'sending_message',
+    ];
     if (task && activeStatuses.includes(task.status)) {
       pollRef.current = setInterval(refresh, 6000);
     }
@@ -574,7 +587,11 @@ export default function TaskView() {
     { id: 'overview', label: 'Overview', icon: <BarChart2 size={12} /> },
   ];
 
-  const isActive = ['running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing'].includes(task.status);
+  const isActive = [
+    'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
+    'acquiring_account', 'auto_registering_account',
+    'bootstrapping_runtime', 'creating_session', 'sending_message',
+  ].includes(task.status);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', fontFamily: 'Inter, sans-serif' }}>
