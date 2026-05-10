@@ -409,19 +409,21 @@ async def create_session(
     project_token: str,
     auth_token: str,
     title: str | None = None,
-    model: str | None = None,
+    model: Any | None = None,
 ) -> dict:
     body: dict[str, Any] = {}
     if title:
         body["title"] = title
-    if model:
-        body["model"] = model
+    model_payload = _normalize_model_payload(model)
+    if model_payload:
+        body["model"] = model_payload
     resp = await _runtime_request(
         "POST",
         runtime_host,
         project_token,
         auth_token,
         "/session",
+        preferred_ygg=project_token,
         json=body,
     )
     resp.raise_for_status()
@@ -437,6 +439,7 @@ async def list_sessions(runtime_host: str, project_token: str, auth_token: str) 
         project_token,
         auth_token,
         "/session",
+        preferred_ygg=project_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -467,9 +470,10 @@ async def send_message(
 
     body: dict[str, Any] = {
         "parts": parts,
-        "noReply": no_reply,
     }
-    if system:
+    if no_reply:
+        body["noReply"] = True
+    if system is not None:
         body["system"] = system
     model_payload = _normalize_model_payload(model)
     if model_payload:
@@ -483,6 +487,7 @@ async def send_message(
         project_token,
         auth_token,
         f"/session/{session_id}/message",
+        preferred_ygg=auth_token,
         json=body,
     )
     resp.raise_for_status()
@@ -502,6 +507,7 @@ async def get_messages(
         project_token,
         auth_token,
         f"/session/{session_id}/message",
+        preferred_ygg=auth_token,
         params={"_": int(time.time() * 1000)},
     )
     resp.raise_for_status()
@@ -521,6 +527,7 @@ async def get_session_context(
         project_token,
         auth_token,
         f"/session/{session_id}/context",
+        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -539,6 +546,7 @@ async def get_subagents(
         project_token,
         auth_token,
         f"/session/{session_id}/subagents",
+        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -557,6 +565,7 @@ async def abort_session(
         project_token,
         auth_token,
         f"/session/{session_id}/abort",
+        preferred_ygg=auth_token,
         json={},
     )
     resp.raise_for_status()
@@ -595,6 +604,7 @@ async def get_file_tree(
         project_token,
         auth_token,
         "/file",
+        preferred_ygg=auth_token,
         params={"path": path},
     )
     resp.raise_for_status()
@@ -614,6 +624,7 @@ async def get_file_content(
         project_token,
         auth_token,
         "/file/content",
+        preferred_ygg=auth_token,
         params={"path": path},
     )
     resp.raise_for_status()
@@ -627,6 +638,7 @@ async def get_file_status(runtime_host: str, project_token: str, auth_token: str
         project_token,
         auth_token,
         "/file/status",
+        preferred_ygg=auth_token,
     )
     resp.raise_for_status()
     payload = _parse_json(resp)
@@ -651,6 +663,7 @@ async def request_preview(
         project_token,
         auth_token,
         "/preview",
+        preferred_ygg=auth_token,
         json={"port": port},
     )
     resp.raise_for_status()

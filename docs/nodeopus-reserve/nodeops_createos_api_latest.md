@@ -190,9 +190,14 @@ Cache-Control: no-cache
 ```json
 {
   "title": "optional",
-  "model": "optional"
+  "model": {
+    "providerID": "openrouter",
+    "modelID": "anthropic/claude-sonnet-4.6"
+  }
 }
 ```
+
+说明：`model` 为可选；若不传则使用上游默认会话模型。传入时应为对象格式，不是纯字符串。
 
 ### 6.2 发送消息
 
@@ -204,12 +209,22 @@ Cache-Control: no-cache
     { "type": "text", "text": "..." },
     { "type": "file", "mime": "image/png", "url": "data:image/png;base64,...." }
   ],
-  "noReply": false,
   "system": "optional",
-  "model": "optional",
+  "model": {
+    "providerID": "openrouter",
+    "modelID": "anthropic/claude-sonnet-4.6"
+  },
   "agent": "optional"
 }
 ```
+
+字段行为（按 2026-05-09/2026-05-10 抓包 + 上游 JS `chunk 1140` 对齐）：
+
+- `parts` 必填，至少包含一个 `text` 或 `file` part
+- `noReply` 仅在 `true` 时发送；默认不带该字段
+- `system` 仅在需要覆盖系统提示时发送
+- `model` 为可选对象 `{providerID, modelID}`，示例见上
+- `agent` 为可选（指定子代理时使用）
 
 ---
 

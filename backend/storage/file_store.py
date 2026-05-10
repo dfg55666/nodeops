@@ -131,5 +131,7 @@ def repo_dir(project_name: str) -> Path:
 
 
 def session_md_path(project_name: str, task_id: str, account_email: str, session_index: int) -> Path:
-    safe_email = account_email.replace("@", "_at_").replace("+", "_plus_")
-    return repo_dir(project_name) / ".nodeops" / task_id / safe_email / f"session-{session_index}.md"
+    # account_email is kept in the function signature for backward compatibility
+    # with existing call sites, but session files are now stored flat:
+    #   .nodeops/<task_id>/session-<n>.md
+    return repo_dir(project_name) / ".nodeops" / task_id / f"session-{session_index}.md"

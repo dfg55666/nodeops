@@ -189,29 +189,28 @@ async def abort_session(session_id: str, account_id: str):
 @router.get("/history/{project_name}/{task_id}")
 def get_session_history(project_name: str, task_id: str):
     """List all saved session .md files for a task."""
-    # Scan .nodeops/{task_id}/ for session files
     from backend.storage.file_store import repo_dir
     nodeops_dir = repo_dir(project_name) / ".nodeops" / task_id
     if not nodeops_dir.exists():
         return {"success": True, "data": []}
 
     sessions = []
-    for account_dir in sorted(nodeops_dir.iterdir()):
-        if account_dir.is_dir():
-            for md_file in sorted(account_dir.glob("session-*.md")):
-                raw = read_md(md_file)
-                account_email = _extract_header_value(raw, "Account") or _decode_account_dir_name(account_dir.name)
-                session_id = _extract_header_value(raw, "NodeOps Session ID")
-                sessions.append({
-                    "account_dir": account_dir.name,
-                    "account": account_dir.name,
-                    "account_email": account_email,
-                    "email": account_email,
-                    "file": md_file.name,
-                    "session_file": md_file.name,
-                    "path": str(md_file.relative_to(repo_dir(project_name))),
-                    "session_id": session_id,
-                })
+
+    # New layout: .nodeops/<task_id>/session-<n>.md (flat, no account subfolder)
+    for md_file in sorted(nodeops_dir.glob("session-*.md")):
+        raw = read_md(md_file)
+        account_email = _extract_header_value(raw, "Account") or ""
+        session_id = _extract_header_value(raw, "NodeOps Session ID")
+        sessions.append({
+            "account_dir": account_email,
+            "account": account_email,
+            "account_email": account_email,
+            "email": account_email,
+            "file": md_file.name,
+            "session_file": md_file.name,
+            "path": str(md_file.relative_to(repo_dir(project_name))),
+            "session_id": session_id,
+        })
     return {"success": True, "data": sessions}
 
 
@@ -221,12 +220,8 @@ def get_session_content(project_name: str, task_id: str,
                         session_file: str = Query(...)):
     """Read the content of a session .md file."""
     from backend.storage.file_store import repo_dir
-    path = repo_dir(project_name) / ".nodeops" / task_id / account / session_file
-    if not path.exists():
-        encoded_account = account.replace("@", "_at_").replace("+", "_plus_")
-        alt = repo_dir(project_name) / ".nodeops" / task_id / encoded_account / session_file
-        if alt.exists():
-            path = alt
+    base = repo_dir(project_name) / ".nodeops" / task_id
+    path = base / session_file
     if not path.exists():
         raise HTTPException(404, "Session file not found")
     content = read_md(path)
@@ -242,10 +237,6 @@ def _extract_header_value(raw: str, key: str) -> str | None:
             value = line[len(prefix):].strip()
             return value or None
     return None
-
-
-def _decode_account_dir_name(value: str) -> str:
-    return str(value or "").replace("_plus_", "+").replace("_at_", "@")
 
 
 def _append_local_user_message(
@@ -269,17 +260,24 @@ def _append_local_user_message(
     if not base.exists():
         return
 
-    candidates = []
-    raw_account = str(account or "").strip()
-    if raw_account:
-        candidates.append(base / raw_account / sf)
-        encoded = raw_account.replace("@", "_at_").replace("+", "_plus_")
-        candidates.append(base / encoded / sf)
+    candidates: list[Path] = []
+    # Preferred new layout path.
+    candidates.append(base / sf)
 
-    if not candidates:
-        for account_dir in base.iterdir():
-            if account_dir.is_dir():
-                candidates.append(account_dir / sf)
+    # Flat layout scan.
+    for p in sorted(base.glob("session-*.md")):
+        candidates.append(p)
+
+    # Deduplicate while preserving order.
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(p)
+    candidates = deduped
 
     target = None
     for p in candidates:

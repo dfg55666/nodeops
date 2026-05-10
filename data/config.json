@@ -1,6 +1,1 @@
-{
-  "poll_interval_running": 5,
-  "poll_interval_idle": 30,
-  "idle_timeout": 120,
-  "max_default_loops": 10
-}
+{"path":"nodeops/data/config.json","content":"{\n  \"poll_interval_running\": 5,\n  \"poll_interval_idle\": 30,\n  \"idle_timeout\": 120,\n  \"max_default_loops\": 10\n}","encoding":"utf-8"}

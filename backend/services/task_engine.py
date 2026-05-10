@@ -368,7 +368,7 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
         "session_file": f"session-{next_session_index}.md",
         "account_id": account["id"],
         "account_email": account["email"],
-        "account_dir": account["email"].replace("@", "_at_").replace("+", "_plus_"),
+        "account_dir": account["email"],
     }
 
 
@@ -573,6 +573,14 @@ async def _task_loop(project_name: str, task_id: str):
 
             elif end_reason == "credit_exhausted":
                 result = await _handle_credit_exhausted(
+                    project_name, task_id, task, account
+                )
+                if result == "continue":
+                    continue
+                break
+
+            elif end_reason == "stuck_idle":
+                result = await _handle_stuck_idle(
                     project_name, task_id, task, account
                 )
                 if result == "continue":
@@ -794,21 +802,28 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                            project_token: str, session_id: str) -> str:
     """Monitor a running session with SSE + polling fallback.
 
-    Returns: "completed" | "credit_exhausted" | "error" | "canceled"
+    Returns: "completed" | "credit_exhausted" | "stuck_idle" | "error" | "canceled"
     """
     auth_token = account["auth_token"]
     last_message_count = 0
     poll_interval = 5  # seconds
     idle_timeout_seconds = 120
+    kickoff_timeout_seconds = max(
+        5, int(os.environ.get("NODEOPS_SESSION_KICKOFF_TIMEOUT_SECONDS", "20"))
+    )
     transient_errors = 0
     last_credit_check_at = 0.0
-    last_activity_at = time.monotonic()
+    monitor_started_at = time.monotonic()
+    last_activity_at = monitor_started_at
     sse_state: dict[str, Any] = {
         "connected": False,
         "last_activity_at": last_activity_at,
         "credit_exhausted": False,
         "last_error": None,
         "account_exhausted_marked": False,
+        "busy_seen": False,
+        "last_status": "",
+        "last_status_at": 0.0,
     }
     sse_task = asyncio.create_task(
         _consume_sse_stream(
@@ -875,6 +890,23 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                         if credit_status["exhausted"]:
                             return "credit_exhausted"
                         return "completed"
+
+                # Upstream may accept message but stay idle forever (no busy, no assistant).
+                # Switch account early instead of waiting for long idle timeout.
+                if (
+                    last_message_count <= 1
+                    and not sse_state.get("busy_seen")
+                    and str(sse_state.get("last_status") or "").lower() == "idle"
+                    and (time.monotonic() - monitor_started_at) >= kickoff_timeout_seconds
+                ):
+                    logger.warning(
+                        "Task %s: session %s stuck idle after send for %ss (account=%s)",
+                        task_id,
+                        session_id,
+                        kickoff_timeout_seconds,
+                        account.get("email"),
+                    )
+                    return "stuck_idle"
 
             except Exception as e:
                 error_str = str(e)
@@ -1026,6 +1058,24 @@ async def _flush_sse_event(
                     exc,
                 )
 
+    # Track runtime status transitions for kickoff health checks.
+    if isinstance(payload, dict):
+        payload_type = str(payload.get("type") or "").strip().lower()
+        if payload_type == "session.status":
+            props = payload.get("properties")
+            status_type = ""
+            if isinstance(props, dict):
+                status_obj = props.get("status")
+                if isinstance(status_obj, dict):
+                    status_type = str(status_obj.get("type") or "").strip().lower()
+                elif status_obj is not None:
+                    status_type = str(status_obj).strip().lower()
+            if status_type:
+                sse_state["last_status"] = status_type
+                sse_state["last_status_at"] = time.monotonic()
+                if status_type == "busy":
+                    sse_state["busy_seen"] = True
+
     _emit_task_event(task_id, "runtime_sse", {
         "session_id": session_id,
         "session_index": session_index,
@@ -1137,6 +1187,63 @@ async def _handle_credit_exhausted(project_name: str, task_id: str,
     })
 
     logger.info(f"Task {task_id}: switching to next account (loop {task['loop_count'] + 1})")
+    return "continue"
+
+
+async def _handle_stuck_idle(project_name: str, task_id: str,
+                             task: dict, account: dict) -> str:
+    """Handle session that remains idle right after send (no busy / no output)."""
+    session_recorder.finalize_session(
+        project_name, task_id, account["email"],
+        task.get("session_index", 0), "stuck_idle"
+    )
+
+    if task["mode"] == "oneshot":
+        account_pool.release_account(account["id"], exhausted=True)
+        update_task(project_name, task_id, {
+            "status": "blocked",
+            "error": "Session stayed idle after send (oneshot mode)"
+        })
+        return "blocked"
+
+    used_ids = task.get("used_account_ids", [])
+    if account["id"] not in used_ids:
+        used_ids.append(account["id"])
+    account_pool.release_account(account["id"], exhausted=True)
+
+    loops = task.get("loops", [])
+    loops.append({
+        "index": task["loop_count"] + 1,
+        "account_email": account["email"],
+        "session_id": task.get("current_session_id"),
+        "started_at": task.get("updated_at"),
+        "ended_at": now_iso(),
+        "end_reason": "stuck_idle",
+        "git_commit": None,
+    })
+
+    update_task(project_name, task_id, {
+        "loop_count": task["loop_count"] + 1,
+        "used_account_ids": used_ids,
+        "loops": loops,
+        "status": "switching",
+        "current_account_id": None,
+        "current_session_id": None,
+        "error": None,
+    })
+    _emit_task_event(task_id, "session_stuck_idle", {
+        "project": project_name,
+        "task_id": task_id,
+        "account_id": account.get("id"),
+        "account_email": account.get("email"),
+        "session_id": task.get("current_session_id"),
+    })
+
+    logger.warning(
+        "Task %s: switching account due to stuck idle session (account=%s)",
+        task_id,
+        account.get("email"),
+    )
     return "continue"
 
 
