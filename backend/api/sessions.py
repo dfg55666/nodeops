@@ -13,11 +13,13 @@ from backend.services import nodeops_client as noc
 from backend.services import account_pool
 from backend.services import credit_monitor
 from backend.services import task_engine
-from backend.services.task_engine import (
-    _extract_message_text as _te_extract_text,
-    _extract_message_role as _te_extract_role,
-    _payload_indicates_credit_exhausted as _te_payload_indicates_credit_exhausted,
+from backend.services.message_utils import (
+    extract_message_role,
+    extract_message_text,
+    normalize_chat_role,
+    normalize_messages,
 )
+from backend.services.sse_parser import parse_sse_payloads
 from backend.storage.file_store import (
     append_md,
     read_md,
@@ -562,21 +564,6 @@ def _extract_runtime_message_has_step_finish(msg: dict) -> bool:
     return False
 
 
-def _extract_runtime_message_objects(messages_data: object) -> list[dict]:
-    if isinstance(messages_data, list):
-        return [m for m in messages_data if isinstance(m, dict)]
-    if isinstance(messages_data, dict):
-        raw = (
-            messages_data.get("messages")
-            or messages_data.get("items")
-            or messages_data.get("data")
-            or []
-        )
-        if isinstance(raw, list):
-            return [m for m in raw if isinstance(m, dict)]
-    return []
-
-
 def _rewrite_session_messages_snapshot(raw: str, rows: list[dict]) -> str:
     marker = "## Messages"
     if marker in raw:
@@ -694,15 +681,13 @@ async def _refresh_session_file_once_from_runtime(
 
 
 def _normalize_runtime_messages(messages_data: object) -> list[dict]:
-    rows = _extract_runtime_message_objects(messages_data)
+    rows = normalize_messages(messages_data)
     out: list[dict] = []
     for msg in rows:
-        role = _te_extract_role(msg)
-        if role == "unknown":
-            role = "assistant"
+        role = normalize_chat_role(extract_message_role(msg))
         if role not in {"user", "assistant"}:
             continue
-        content = _te_extract_text(msg).strip()
+        content = extract_message_text(msg).strip()
         if not content:
             continue
         item = {"role": role, "content": content}
@@ -716,18 +701,16 @@ def _normalize_runtime_messages(messages_data: object) -> list[dict]:
 
 
 def _normalize_runtime_messages_meta(messages_data: object) -> list[dict]:
-    rows = _extract_runtime_message_objects(messages_data)
+    rows = normalize_messages(messages_data)
     out: list[dict] = []
     for msg in rows:
-        role = _te_extract_role(msg)
-        if role == "unknown":
-            role = "assistant"
+        role = normalize_chat_role(extract_message_role(msg))
         if role not in {"user", "assistant"}:
             continue
         out.append({
             "id": _extract_runtime_message_id(msg),
             "role": role,
-            "content": _te_extract_text(msg).strip(),
+            "content": extract_message_text(msg).strip(),
             "has_step_finish": _extract_runtime_message_has_step_finish(msg),
             "has_error": _extract_runtime_message_has_error(msg),
         })
@@ -777,53 +760,6 @@ def _extract_send_response_message_id(payload: object) -> str:
     return str(info.get("id") or "").strip()
 
 
-async def _iter_session_sse_payloads(
-    runtime_host: str,
-    project_token: str,
-    session_id: str,
-):
-    """Yield parsed upstream SSE payloads as `(event_name, payload)` tuples."""
-    event_name = "message"
-    data_lines: list[str] = []
-    async for line in noc.connect_sse(runtime_host, project_token, session_id):
-        if line is None:
-            continue
-        line = str(line)
-        if line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event_name = line.split(":", 1)[1].strip() or "message"
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line.split(":", 1)[1].lstrip())
-            continue
-        if line.strip() != "":
-            data_lines.append(line)
-            continue
-
-        if not data_lines:
-            event_name = "message"
-            continue
-        data_text = "\n".join(data_lines)
-        data_lines.clear()
-        payload: object = data_text
-        try:
-            payload = json.loads(data_text)
-        except Exception:
-            payload = data_text
-        yield event_name, payload
-        event_name = "message"
-
-    if data_lines:
-        data_text = "\n".join(data_lines)
-        payload: object = data_text
-        try:
-            payload = json.loads(data_text)
-        except Exception:
-            payload = data_text
-        yield event_name, payload
-
-
 def _extract_credit_error_message(payload: object) -> str:
     if not isinstance(payload, dict):
         return ""
@@ -846,12 +782,13 @@ async def _watch_credit_exhausted_sse(
     state: dict[str, object],
 ):
     """Background watcher for session SSE credit exhaustion signals."""
-    async for _event_name, payload in _iter_session_sse_payloads(
-        runtime_host, project_token, session_id
+    async for _event_name, payload in parse_sse_payloads(
+        noc.connect_sse(runtime_host, project_token, session_id)
     ):
-        if _te_payload_indicates_credit_exhausted(payload):
+        message = _extract_credit_error_message(payload)
+        if _should_mark_account_exhausted(message):
             state["credit_exhausted"] = True
-            state["message"] = _extract_credit_error_message(payload)
+            state["message"] = message
             return
 
 
