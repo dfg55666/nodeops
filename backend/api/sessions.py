@@ -19,6 +19,7 @@ from backend.services.message_utils import (
     normalize_chat_role,
     normalize_messages,
 )
+from backend.services.session_snapshot import build_session_messages_snapshot
 from backend.services.sse_parser import parse_sse_payloads
 from backend.storage.file_store import (
     append_md,
@@ -565,34 +566,8 @@ def _extract_runtime_message_has_step_finish(msg: dict) -> bool:
 
 
 def _rewrite_session_messages_snapshot(raw: str, rows: list[dict]) -> str:
-    marker = "## Messages"
-    if marker in raw:
-        idx = raw.find(marker)
-        marker_end = raw.find("\n", idx)
-        if marker_end == -1:
-            header = raw.rstrip("\n") + "\n"
-        else:
-            header = raw[: marker_end + 1]
-        if not header.endswith("\n\n"):
-            header = header.rstrip("\n") + "\n\n"
-    else:
-        header = raw.rstrip("\n")
-        if header:
-            header += "\n\n"
-        header += "## Messages\n\n"
-
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    body_lines: list[str] = []
-    for row in rows:
-        role = str(row.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = str(row.get("content") or "").strip()
-        if not content:
-            continue
-        tag = "Assistant" if role == "assistant" else "User"
-        body_lines.append(f"[{tag}] {ts}\n{content}\n\n")
-    return header + "".join(body_lines)
+    return build_session_messages_snapshot(raw, rows, timestamp=ts)
 
 
 async def _sync_session_file_once_from_runtime(

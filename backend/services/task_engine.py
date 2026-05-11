@@ -36,6 +36,7 @@ from backend.services.register import (
     generate_gmail_aliases,
     gmail_auto_register,
 )
+from backend.services.session_snapshot import build_session_messages_snapshot
 from backend.services.sse_parser import parse_sse_payloads
 
 logger = logging.getLogger(__name__)
@@ -1276,37 +1277,7 @@ def _rewrite_session_messages_snapshot(
         return
 
     raw = path.read_text(encoding="utf-8")
-    marker = "## Messages"
-    if marker in raw:
-        idx = raw.find(marker)
-        marker_end = raw.find("\n", idx)
-        if marker_end == -1:
-            header = raw.rstrip("\n") + "\n"
-        else:
-            header = raw[: marker_end + 1]
-        if not header.endswith("\n\n"):
-            if header.endswith("\n"):
-                header += "\n"
-            else:
-                header += "\n\n"
-    else:
-        header = raw.rstrip("\n")
-        if header:
-            header += "\n\n"
-        header += "## Messages\n\n"
-
-    body_lines: list[str] = []
-    for row in rows:
-        role = str(row.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = str(row.get("content") or "").rstrip()
-        if not content:
-            continue
-        role_tag = "User" if role == "user" else "Assistant"
-        body_lines.append(f"[{role_tag}]\n{content}\n\n")
-
-    updated = header + "".join(body_lines)
+    updated = build_session_messages_snapshot(raw, rows)
     if updated != raw:
         path.write_text(updated, encoding="utf-8")
 
