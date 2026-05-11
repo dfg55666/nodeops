@@ -8,48 +8,16 @@ from fastapi.responses import StreamingResponse
 from backend.services import nodeops_client as noc
 from backend.services import account_pool
 from backend.services import task_engine
+from backend.services.message_utils import (
+    extract_message_role,
+    extract_message_text,
+    normalize_chat_role,
+)
+from backend.services.sse_parser import parse_sse_payloads
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/events", tags=["events"])
-
-
-def _extract_message_role(msg: dict) -> str:
-    role = msg.get("role")
-    if role:
-        return str(role).strip().lower()
-    info = msg.get("info")
-    if isinstance(info, dict):
-        info_role = info.get("role")
-        if info_role:
-            return str(info_role).strip().lower()
-    return "unknown"
-
-
-def _normalize_chat_role(role: str) -> str:
-    v = str(role or "").strip().lower()
-    if v in {"user", "assistant"}:
-        return v
-    if v == "unknown":
-        return "assistant"
-    return v
-
-
-def _extract_message_text(msg: dict) -> str:
-    if isinstance(msg.get("content"), str):
-        return str(msg.get("content") or "")
-    parts = msg.get("parts", msg.get("content", []))
-    if isinstance(parts, list):
-        texts: list[str] = []
-        for part in parts:
-            if isinstance(part, dict) and str(part.get("type") or "") == "text":
-                texts.append(str(part.get("text") or ""))
-            elif isinstance(part, str):
-                texts.append(part)
-        joined = "\n".join([t for t in texts if str(t).strip()])
-        if joined.strip():
-            return joined
-    return str(msg.get("text") or "")
 
 
 def _semantic_session_event(
@@ -109,8 +77,8 @@ def _semantic_session_event(
     if msg_obj is None:
         msg_obj = payload
 
-    role = _normalize_chat_role(_extract_message_role(msg_obj))
-    text = _extract_message_text(msg_obj).strip()
+    role = normalize_chat_role(extract_message_role(msg_obj))
+    text = extract_message_text(msg_obj).strip()
     if role not in {"user", "assistant"} or not text:
         return None
     return "message", {
@@ -170,57 +138,17 @@ async def stream_session_events(
 
     async def event_generator():
         try:
-            # Parse upstream SSE then emit semantic events only.
-            upstream_event = "message"
-            data_lines: list[str] = []
-
-            async def flush_event() -> str | None:
-                nonlocal upstream_event, data_lines
-                if not data_lines:
-                    upstream_event = "message"
-                    return None
-                data_text = "\n".join(data_lines)
-                data_lines = []
-                payload: Any = data_text
-                try:
-                    payload = json.loads(data_text)
-                except Exception:
-                    upstream_event = "message"
-                    return None
+            async for upstream_event, payload in parse_sse_payloads(
+                noc.connect_sse(runtime_host, project_token, session_id)
+            ):
                 mapped = _semantic_session_event(session_id, upstream_event, payload)
-                upstream_event = "message"
                 if not mapped:
-                    return None
+                    continue
                 mapped_event, mapped_payload = mapped
-                return (
+                yield (
                     f"event: {mapped_event}\n"
                     f"data: {json.dumps(mapped_payload, default=str, ensure_ascii=False)}\n\n"
                 )
-
-            async for line in noc.connect_sse(
-                runtime_host, project_token, session_id
-            ):
-                if line is None:
-                    continue
-                line = str(line)
-                if line.startswith(":"):
-                    continue
-                if line.startswith("event:"):
-                    upstream_event = line.split(":", 1)[1].strip() or "message"
-                    continue
-                if line.startswith("data:"):
-                    data_lines.append(line.split(":", 1)[1].lstrip())
-                    continue
-                if line.strip() == "":
-                    out = await flush_event()
-                    if out:
-                        yield out
-                    continue
-                data_lines.append(line)
-
-            out = await flush_event()
-            if out:
-                yield out
         except Exception as e:
             logger.error(f"SSE stream error: {e}")
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
