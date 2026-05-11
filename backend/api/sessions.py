@@ -1,15 +1,23 @@
 """Session & message proxy routes — direct access to NodeOps runtime."""
 import asyncio
 from datetime import datetime, timezone
+import json
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from backend.services import nodeops_client as noc
 from backend.services import account_pool
+from backend.services import credit_monitor
 from backend.services import task_engine
+from backend.services.task_engine import (
+    _extract_message_text as _te_extract_text,
+    _extract_message_role as _te_extract_role,
+    _payload_indicates_credit_exhausted as _te_payload_indicates_credit_exhausted,
+)
 from backend.storage.file_store import (
     append_md,
     read_md,
@@ -81,11 +89,20 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
     effective_session_id = str(session_id or "").strip()
     task_bound_send = bool(req.project_name and req.task_id)
     task_state = None
+    task_bound_account_id = ""
     if task_bound_send:
         task_state = task_engine.get_task(str(req.project_name or ""), str(req.task_id or ""))
         if isinstance(task_state, dict):
-            runtime_host = str(task_state.get("current_runtime_host") or runtime_host).strip()
-            project_token = str(task_state.get("current_project_token") or project_token).strip()
+            # Task-bound sends must use task-scoped runtime/session state.
+            # Do not fallback to account cached runtime; that may point to a different deployment.
+            runtime_host = str(task_state.get("current_runtime_host") or "").strip()
+            project_token = str(task_state.get("current_project_token") or "").strip()
+            task_bound_account_id = str(task_state.get("current_account_id") or "").strip()
+            if task_bound_account_id and task_bound_account_id != account_id:
+                task_acc = account_pool.get_account(task_bound_account_id)
+                if task_acc:
+                    acc = task_acc
+                    account_id = task_bound_account_id
 
     local_or_pending_session = (
         not effective_session_id
@@ -133,18 +150,33 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
 
     requested_model = req.model.modelID if req.model else ""
     logger.info(
-        "Session send request: session_id=%s account_id=%s account_email=%s text_len=%s has_image=%s model=%s",
+        "Session send request: session_id=%s account_id=%s account_email=%s task_bound=%s task_bound_account=%s text_len=%s has_image=%s model=%s",
         session_id,
         account_id,
         acc.get("email"),
+        task_bound_send,
+        task_bound_account_id or "",
         len(str(req.text or "")),
         bool(str(req.image_url or "").strip()),
         requested_model or "<session-default>",
     )
 
     data = None
+    credit_error_after_send = ""
+    monitor_credit_sse = bool(req.project_name and req.task_id and not bool(req.no_reply))
     send_attempts = 3
     for send_attempt in range(1, send_attempts + 1):
+        sse_state: dict[str, object] = {"credit_exhausted": False, "message": ""}
+        sse_task = None
+        if monitor_credit_sse:
+            sse_task = asyncio.create_task(
+                _watch_credit_exhausted_sse(
+                    runtime_host=runtime_host,
+                    project_token=project_token,
+                    session_id=effective_session_id,
+                    state=sse_state,
+                )
+            )
         try:
             data = await noc.send_message(
                 runtime_host, project_token, acc["auth_token"],
@@ -156,6 +188,28 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
                 image_url=req.image_url,
                 image_mime=req.image_mime,
             )
+            if sse_task is not None:
+                try:
+                    timeout_s = float(
+                        os.environ.get("NODEOPS_SEND_SSE_CREDIT_CHECK_TIMEOUT_S", "8")
+                    )
+                except Exception:
+                    timeout_s = 8.0
+                try:
+                    await asyncio.wait_for(asyncio.shield(sse_task), timeout=timeout_s)
+                except TimeoutError:
+                    pass
+                except Exception:
+                    logger.debug(
+                        "SSE watcher failed during send: session=%s account=%s",
+                        effective_session_id,
+                        account_id,
+                        exc_info=True,
+                    )
+                if bool(sse_state.get("credit_exhausted")):
+                    credit_error_after_send = str(
+                        sse_state.get("message") or "credits exhausted"
+                    )
             break
         except Exception as exc:
             err_message = str(exc)
@@ -209,6 +263,16 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
                         account_id,
                     )
             raise HTTPException(502, f"Upstream send failed: {err_message}")
+        finally:
+            if sse_task is not None and not sse_task.done():
+                sse_task.cancel()
+            if sse_task is not None:
+                try:
+                    await sse_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
 
     if data is None:
         raise HTTPException(502, "Upstream send failed: empty response")
@@ -266,6 +330,7 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
                     runtime_host=runtime_host,
                     project_token=project_token,
                     auth_token=acc["auth_token"],
+                    account_id=account_id,
                     session_id=effective_session_id,
                     sent_user_message_id=sent_user_message_id,
                     sent_user_text=str(req.text or "").strip(),
@@ -280,6 +345,16 @@ async def send_message(session_id: str, account_id: str, req: SendMessageRequest
             req.task_id,
             req.session_file,
         )
+
+    if credit_error_after_send:
+        try:
+            account_pool.mark_account_status(account_id, "exhausted")
+        except Exception:
+            logger.exception(
+                "Failed to mark account exhausted after SSE credit error: account_id=%s",
+                account_id,
+            )
+        raise HTTPException(502, credit_error_after_send)
 
     return {"success": True, "data": data, "effective_session_id": effective_session_id}
 
@@ -324,8 +399,10 @@ def get_session_history(project_name: str, task_id: str):
 
 
 @router.get("/history/{project_name}/{task_id}/content")
-def get_session_content(project_name: str, task_id: str,
-                        session_file: str = Query(...)):
+async def get_session_content(project_name: str, task_id: str,
+                              session_file: str = Query(...),
+                              account_id: str | None = Query(None),
+                              refresh_runtime: bool = Query(False)):
     """Read the content of a session .md file."""
     from backend.storage.file_store import repo_dir
     base = repo_dir(project_name) / ".nodeops" / task_id
@@ -333,7 +410,27 @@ def get_session_content(project_name: str, task_id: str,
     if not path.exists():
         raise HTTPException(404, "Session file not found")
     content = read_md(path)
-    messages = _parse_session_messages(content)
+    runtime_messages: list[dict] | None = None
+    if refresh_runtime:
+        try:
+            runtime_messages = await _refresh_session_file_once_from_runtime(
+                path=path,
+                project_name=project_name,
+                task_id=task_id,
+                account_id=account_id,
+                current_content=content,
+            )
+            content = read_md(path)
+        except Exception:
+            logger.debug(
+                "session refresh failed: project=%s task=%s file=%s account=%s",
+                project_name,
+                task_id,
+                session_file,
+                account_id,
+                exc_info=True,
+            )
+    messages = runtime_messages if isinstance(runtime_messages, list) else _parse_session_messages(content)
     return {"success": True, "data": {"content": content, "messages": messages}}
 
 
@@ -443,35 +540,6 @@ def _append_local_user_message(
     append_md(target, f"[User] {ts}\n{content}\n\n")
 
 
-def _extract_runtime_message_role(msg: dict) -> str:
-    role = msg.get("role")
-    if role:
-        return str(role).strip().lower()
-    info = msg.get("info")
-    if isinstance(info, dict):
-        info_role = info.get("role")
-        if info_role:
-            return str(info_role).strip().lower()
-    return "unknown"
-
-
-def _extract_runtime_message_text(msg: dict) -> str:
-    if isinstance(msg.get("content"), str):
-        return str(msg.get("content") or "")
-    parts = msg.get("parts", msg.get("content", []))
-    if isinstance(parts, list):
-        texts: list[str] = []
-        for part in parts:
-            if isinstance(part, dict) and str(part.get("type") or "") == "text":
-                texts.append(str(part.get("text") or ""))
-            elif isinstance(part, str):
-                texts.append(part)
-        joined = "\n".join([t for t in texts if str(t).strip()])
-        if joined.strip():
-            return joined
-    return str(msg.get("text") or "")
-
-
 def _extract_runtime_message_id(msg: dict) -> str:
     info = msg.get("info")
     if isinstance(info, dict):
@@ -509,16 +577,132 @@ def _extract_runtime_message_objects(messages_data: object) -> list[dict]:
     return []
 
 
+def _rewrite_session_messages_snapshot(raw: str, rows: list[dict]) -> str:
+    marker = "## Messages"
+    if marker in raw:
+        idx = raw.find(marker)
+        marker_end = raw.find("\n", idx)
+        if marker_end == -1:
+            header = raw.rstrip("\n") + "\n"
+        else:
+            header = raw[: marker_end + 1]
+        if not header.endswith("\n\n"):
+            header = header.rstrip("\n") + "\n\n"
+    else:
+        header = raw.rstrip("\n")
+        if header:
+            header += "\n\n"
+        header += "## Messages\n\n"
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    body_lines: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(row.get("content") or "").strip()
+        if not content:
+            continue
+        tag = "Assistant" if role == "assistant" else "User"
+        body_lines.append(f"[{tag}] {ts}\n{content}\n\n")
+    return header + "".join(body_lines)
+
+
+async def _sync_session_file_once_from_runtime(
+    path: Path,
+    runtime_host: str,
+    project_token: str,
+    auth_token: str,
+    session_id: str,
+) -> int:
+    if not path.exists():
+        return 0
+    sid = str(session_id or "").strip()
+    if not sid:
+        return 0
+
+    remote = await noc.get_messages(runtime_host, project_token, auth_token, sid)
+    remote_msgs = _normalize_runtime_messages(remote)
+    if not remote_msgs:
+        return 0
+
+    raw = read_md(path)
+    updated = _rewrite_session_messages_snapshot(raw, remote_msgs)
+    if updated != raw:
+        path.write_text(updated, encoding="utf-8")
+    return len(remote_msgs)
+
+
+async def _refresh_session_file_once_from_runtime(
+    path: Path,
+    project_name: str,
+    task_id: str,
+    account_id: str | None,
+    current_content: str,
+) -> list[dict] | None:
+    task = task_engine.get_task(project_name, task_id) or {}
+    runtime_host = str(task.get("current_runtime_host") or "").strip()
+    project_token = str(task.get("current_project_token") or "").strip()
+
+    aid = str(account_id or "").strip() or str(task.get("current_account_id") or "").strip()
+    acc = account_pool.get_account(aid) if aid else None
+    if not acc:
+        for used_id in task.get("used_account_ids", []):
+            candidate = account_pool.get_account(str(used_id or "").strip())
+            if candidate and candidate.get("auth_token"):
+                acc = candidate
+                break
+    if not acc:
+        account_email = _extract_header_value(current_content, "Account") or ""
+        if account_email:
+            acc = account_pool.get_account_by_email(account_email)
+    if not acc or not acc.get("auth_token"):
+        return None
+
+    auth_token = str(acc.get("auth_token") or "").strip()
+    if not runtime_host:
+        runtime_host = str(acc.get("runtime_host") or "").strip()
+    if not project_token:
+        project_token = str(acc.get("project_token") or "").strip()
+    if not runtime_host or not project_token:
+        return None
+
+    session_id = _extract_header_value(current_content, "NodeOps Session ID") or ""
+    session_id = str(session_id).strip()
+    if not session_id:
+        return None
+
+    await _sync_session_file_once_from_runtime(
+        path=path,
+        runtime_host=runtime_host,
+        project_token=project_token,
+        auth_token=auth_token,
+        session_id=session_id,
+    )
+    try:
+        remote = await noc.get_messages(runtime_host, project_token, auth_token, session_id)
+        return _normalize_runtime_messages(remote)
+    except Exception:
+        logger.debug(
+            "fetch runtime messages for response failed: project=%s task=%s session_id=%s",
+            project_name,
+            task_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _normalize_runtime_messages(messages_data: object) -> list[dict]:
     rows = _extract_runtime_message_objects(messages_data)
     out: list[dict] = []
     for msg in rows:
-        role = _extract_runtime_message_role(msg)
+        role = _te_extract_role(msg)
         if role == "unknown":
             role = "assistant"
         if role not in {"user", "assistant"}:
             continue
-        content = _extract_runtime_message_text(msg).strip()
+        content = _te_extract_text(msg).strip()
         if not content:
             continue
         item = {"role": role, "content": content}
@@ -535,7 +719,7 @@ def _normalize_runtime_messages_meta(messages_data: object) -> list[dict]:
     rows = _extract_runtime_message_objects(messages_data)
     out: list[dict] = []
     for msg in rows:
-        role = _extract_runtime_message_role(msg)
+        role = _te_extract_role(msg)
         if role == "unknown":
             role = "assistant"
         if role not in {"user", "assistant"}:
@@ -543,7 +727,7 @@ def _normalize_runtime_messages_meta(messages_data: object) -> list[dict]:
         out.append({
             "id": _extract_runtime_message_id(msg),
             "role": role,
-            "content": _extract_runtime_message_text(msg).strip(),
+            "content": _te_extract_text(msg).strip(),
             "has_step_finish": _extract_runtime_message_has_step_finish(msg),
             "has_error": _extract_runtime_message_has_error(msg),
         })
@@ -593,6 +777,84 @@ def _extract_send_response_message_id(payload: object) -> str:
     return str(info.get("id") or "").strip()
 
 
+async def _iter_session_sse_payloads(
+    runtime_host: str,
+    project_token: str,
+    session_id: str,
+):
+    """Yield parsed upstream SSE payloads as `(event_name, payload)` tuples."""
+    event_name = "message"
+    data_lines: list[str] = []
+    async for line in noc.connect_sse(runtime_host, project_token, session_id):
+        if line is None:
+            continue
+        line = str(line)
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.split(":", 1)[1].strip() or "message"
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].lstrip())
+            continue
+        if line.strip() != "":
+            data_lines.append(line)
+            continue
+
+        if not data_lines:
+            event_name = "message"
+            continue
+        data_text = "\n".join(data_lines)
+        data_lines.clear()
+        payload: object = data_text
+        try:
+            payload = json.loads(data_text)
+        except Exception:
+            payload = data_text
+        yield event_name, payload
+        event_name = "message"
+
+    if data_lines:
+        data_text = "\n".join(data_lines)
+        payload: object = data_text
+        try:
+            payload = json.loads(data_text)
+        except Exception:
+            payload = data_text
+        yield event_name, payload
+
+
+def _extract_credit_error_message(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    payload_type = str(payload.get("type") or "").strip().lower()
+    if payload_type != "session.error":
+        return ""
+    props = payload.get("properties")
+    if not isinstance(props, dict):
+        return ""
+    err = props.get("error")
+    if not isinstance(err, dict):
+        return ""
+    return str(err.get("message") or "").strip()
+
+
+async def _watch_credit_exhausted_sse(
+    runtime_host: str,
+    project_token: str,
+    session_id: str,
+    state: dict[str, object],
+):
+    """Background watcher for session SSE credit exhaustion signals."""
+    async for _event_name, payload in _iter_session_sse_payloads(
+        runtime_host, project_token, session_id
+    ):
+        if _te_payload_indicates_credit_exhausted(payload):
+            state["credit_exhausted"] = True
+            state["message"] = _extract_credit_error_message(payload)
+            return
+
+
 async def _sync_session_file_from_runtime(
     project_name: str,
     task_id: str,
@@ -600,6 +862,7 @@ async def _sync_session_file_from_runtime(
     runtime_host: str,
     project_token: str,
     auth_token: str,
+    account_id: str | None,
     session_id: str,
     sent_user_message_id: str | None = None,
     sent_user_text: str | None = None,
@@ -627,63 +890,94 @@ async def _sync_session_file_from_runtime(
     except Exception:
         max_wait_s = 900.0
 
-    deadline = time.monotonic() + max_wait_s
-    while time.monotonic() < deadline:
+    sse_state: dict[str, object] = {"credit_exhausted": False, "message": ""}
+    sse_task = asyncio.create_task(
+        _watch_credit_exhausted_sse(
+            runtime_host=runtime_host,
+            project_token=project_token,
+            session_id=sid,
+            state=sse_state,
+        )
+    )
+
+    try:
+        deadline = time.monotonic() + max_wait_s
+        while time.monotonic() < deadline:
+            try:
+                if bool(sse_state.get("credit_exhausted")):
+                    if account_id:
+                        try:
+                            account_pool.mark_account_status(str(account_id), "exhausted")
+                        except Exception:
+                            logger.exception(
+                                "Failed to mark account exhausted from SSE watcher: account_id=%s",
+                                account_id,
+                            )
+                    logger.info(
+                        "Session sync stopped on SSE credit exhausted: project=%s task=%s file=%s session=%s msg=%s",
+                        project_name,
+                        task_id,
+                        session_file,
+                        sid,
+                        str(sse_state.get("message") or ""),
+                    )
+                    return
+
+                await _sync_session_file_once_from_runtime(
+                    path=path,
+                    runtime_host=runtime_host,
+                    project_token=project_token,
+                    auth_token=auth_token,
+                    session_id=sid,
+                )
+                remote = await noc.get_messages(runtime_host, project_token, auth_token, sid)
+                remote_meta = _normalize_runtime_messages_meta(remote)
+                if any(
+                    bool(row.get("has_error"))
+                    and credit_monitor.is_credit_error(str(row.get("content") or ""))
+                    for row in remote_meta
+                ):
+                    if account_id:
+                        try:
+                            account_pool.mark_account_status(str(account_id), "exhausted")
+                        except Exception:
+                            logger.exception(
+                                "Failed to mark account exhausted from remote meta: account_id=%s",
+                                account_id,
+                            )
+                    return
+
+                if _is_runtime_turn_complete(
+                    remote_meta,
+                    sent_user_message_id=sent_user_message_id,
+                    sent_user_text=sent_user_text,
+                ):
+                    return
+            except Exception:
+                logger.debug(
+                    "session sync retry failed: project=%s task=%s file=%s session=%s",
+                    project_name,
+                    task_id,
+                    session_file,
+                    sid,
+                    exc_info=True,
+                )
+            await asyncio.sleep(poll_interval_s)
+    finally:
+        if not sse_task.done():
+            sse_task.cancel()
         try:
-            remote = await noc.get_messages(runtime_host, project_token, auth_token, sid)
-            remote_msgs = _normalize_runtime_messages(remote)
-            remote_meta = _normalize_runtime_messages_meta(remote)
-            raw = read_md(path)
-            local_msgs = _parse_session_messages(raw)
-
-            start = 0
-            if local_msgs:
-                last = local_msgs[-1]
-                matched = False
-                for idx in range(len(remote_msgs) - 1, -1, -1):
-                    if (
-                        remote_msgs[idx]["role"] == last["role"]
-                        and remote_msgs[idx]["content"].strip() == str(last.get("content") or "").strip()
-                    ):
-                        start = idx + 1
-                        matched = True
-                        break
-                if not matched:
-                    prefix = 0
-                    while (
-                        prefix < len(local_msgs)
-                        and prefix < len(remote_msgs)
-                        and local_msgs[prefix]["role"] == remote_msgs[prefix]["role"]
-                        and str(local_msgs[prefix].get("content") or "").strip() == remote_msgs[prefix]["content"].strip()
-                    ):
-                        prefix += 1
-                    start = prefix
-
-            new_rows = remote_msgs[start:]
-            if new_rows:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                chunks: list[str] = []
-                for row in new_rows:
-                    tag = "Assistant" if row["role"] == "assistant" else "User"
-                    chunks.append(f"[{tag}] {ts}\n{row['content']}\n\n")
-                append_md(path, "".join(chunks))
-
-            if _is_runtime_turn_complete(
-                remote_meta,
-                sent_user_message_id=sent_user_message_id,
-                sent_user_text=sent_user_text,
-            ):
-                return
+            await sse_task
+        except asyncio.CancelledError:
+            pass
         except Exception:
             logger.debug(
-                "session sync retry failed: project=%s task=%s file=%s session=%s",
+                "session sync SSE watcher finished with error: project=%s task=%s session=%s",
                 project_name,
                 task_id,
-                session_file,
                 sid,
                 exc_info=True,
             )
-        await asyncio.sleep(poll_interval_s)
 
     logger.info(
         "Session sync timed out before completion marker: project=%s task=%s file=%s session=%s wait=%ss",
@@ -753,6 +1047,7 @@ async def _bootstrap_fresh_runtime_session_for_task_send(
                 req.task_id,
                 req.session_file,
                 created_session_id,
+                account_email=str(account.get("email") or "").strip(),
             )
             return runtime_host, project_token, created_session_id
         except Exception as exc:
@@ -779,6 +1074,7 @@ def _replace_local_session_id_header(
     task_id: str | None,
     session_file: str | None,
     new_session_id: str,
+    account_email: str | None = None,
 ):
     from backend.storage.file_store import repo_dir
 
@@ -797,17 +1093,33 @@ def _replace_local_session_id_header(
     if not raw:
         return
 
-    prefix = "- NodeOps Session ID:"
+    session_prefix = "- NodeOps Session ID:"
+    account_prefix = "- Account:"
+    next_account = str(account_email or "").strip()
     out_lines: list[str] = []
-    replaced = False
+    replaced_session = False
+    replaced_account = False
     for line in raw.splitlines():
-        if line.startswith(prefix):
-            out_lines.append(f"{prefix} {sid}")
-            replaced = True
+        if line.startswith(session_prefix):
+            out_lines.append(f"{session_prefix} {sid}")
+            replaced_session = True
+        elif next_account and line.startswith(account_prefix):
+            out_lines.append(f"{account_prefix} {next_account}")
+            replaced_account = True
         else:
             out_lines.append(line)
-    if not replaced:
+    if not replaced_session:
         return
+    if next_account and not replaced_account:
+        # Keep header compact: append account line right after title block when missing.
+        inserted = False
+        rewritten: list[str] = []
+        for line in out_lines:
+            rewritten.append(line)
+            if not inserted and line.startswith(session_prefix):
+                rewritten.insert(len(rewritten) - 1, f"{account_prefix} {next_account}")
+                inserted = True
+        out_lines = rewritten
 
     path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
 
@@ -844,22 +1156,7 @@ def _extract_runtime_error(payload: object) -> dict | None:
 
 
 def _should_mark_account_exhausted(message: str) -> bool:
-    msg = str(message or "").strip().lower()
-    if not msg:
-        return False
-    if "key limit exceeded" in msg:
-        return True
-    # Keep this stricter than generic "limit" to avoid false positives on
-    # transient rate limits or unrelated upstream constraints.
-    return any(kw in msg for kw in (
-        "credit",
-        "quota",
-        "insufficient",
-        "no remaining",
-        "exhausted",
-        "not enough",
-        "balance",
-    ))
+    return bool(credit_monitor.is_credit_error(str(message or "")))
 
 
 def _is_transient_upstream_error(message: str) -> bool:

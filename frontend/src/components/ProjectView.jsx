@@ -15,6 +15,7 @@ function statusStyle(status) {
     case 'bootstrapping_runtime':
     case 'creating_session':
     case 'sending_message':
+    case 'submitting_commit':
       return { color: '#00a888', borderColor: 'rgba(0,168,136,0.3)', bg: 'rgba(0,168,136,0.08)' };
     case 'pending':
     case 'switching':
@@ -45,6 +46,7 @@ function StatusIcon({ status }) {
     case 'bootstrapping_runtime':
     case 'creating_session':
     case 'sending_message':
+    case 'submitting_commit':
       return <Play size={sz} style={{ color: '#00a888', flexShrink: 0 }} />;
     case 'pending':
     case 'switching':
@@ -80,7 +82,7 @@ function TaskRow({ task, projectName }) {
   const isActive  = [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(status);
 
   return (
@@ -188,7 +190,7 @@ export default function ProjectView() {
   }, [projectName]);
 
   const runningCount  = taskList.filter((t) =>
-    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message'].includes(t.status)
+    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit'].includes(t.status)
   ).length;
   const pendingCount  = taskList.filter((t) =>
     ['pending', 'switching', 'syncing', 'pushing', 'acquiring_account', 'auto_registering_account'].includes(t.status)

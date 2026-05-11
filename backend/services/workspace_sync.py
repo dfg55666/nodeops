@@ -197,11 +197,23 @@ async def sync_workspace_to_repo(runtime_host: str, project_token: str,
             )
             copy_root = tmp_path
 
-        # Overwrite repo files (skip .git and .nodeops)
+        # ── 先清理本地 repo（保留 .git 和 .nodeops）──
+        KEEP_DIRS = {".git", ".nodeops"}
+        for child in list(target.iterdir()):
+            if child.name in KEEP_DIRS:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child)
+                logger.debug(f"Removed dir: {child.name}")
+            else:
+                child.unlink()
+                logger.debug(f"Removed file: {child.name}")
+
+        # ── 把 workspace 内容复制到本地 repo ──
         for item in copy_root.rglob("*"):
             if item.is_file():
                 rel = item.relative_to(copy_root)
-                if rel.parts and rel.parts[0] in {".git", ".nodeops"}:
+                if rel.parts and rel.parts[0] in KEEP_DIRS:
                     continue
                 dest = target / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)

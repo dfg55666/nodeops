@@ -17,6 +17,8 @@ class CreateTaskRequest(BaseModel):
     mode: str = "auto"  # auto | oneshot
     message: str | None = None
     prompt: str | None = None
+    commit_prompt: str | None = None
+    fallback_sync: bool = True
     model: ModelRef | None = None
     max_loops: int = 10
     task_id: str | None = None
@@ -25,6 +27,8 @@ class CreateTaskRequest(BaseModel):
 class UpdateTaskRequest(BaseModel):
     message: str | None = None
     mode: str | None = None
+    commit_prompt: str | None = None
+    fallback_sync: bool | None = None
     model: ModelRef | None = None
     max_loops: int | None = None
     status: str | None = None
@@ -60,6 +64,8 @@ def create_task(req: CreateTaskRequest):
             project_name=req.project,
             mode=req.mode,
             message=message,
+            commit_prompt=req.commit_prompt,
+            fallback_sync=req.fallback_sync,
             model=req.model.model_dump() if req.model else None,
             max_loops=req.max_loops,
             task_id=req.task_id,
@@ -104,6 +110,16 @@ async def cancel_task(project_name: str, task_id: str):
 async def create_empty_session(project_name: str, task_id: str):
     try:
         data = await task_engine.create_empty_session(project_name, task_id)
+        return {"success": True, "data": data}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/{project_name}/{task_id}/switch-account")
+async def switch_account(project_name: str, task_id: str):
+    """Switch the task to a new account (auto-selected by pool)."""
+    try:
+        data = await task_engine.switch_task_account(project_name, task_id)
         return {"success": True, "data": data}
     except ValueError as e:
         raise HTTPException(400, str(e))

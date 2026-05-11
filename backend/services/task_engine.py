@@ -14,9 +14,10 @@ import uuid
 import logging
 import time
 import shutil
+from pathlib import Path
 from typing import Any
 from backend.storage.file_store import (
-    task_json, tasks_dir, project_json, read_json, write_json, now_iso, repo_dir,
+    task_json, tasks_dir, project_json, read_json, write_json, now_iso, repo_dir, session_md_path,
 )
 from backend.services import nodeops_client as noc
 from backend.services import account_pool
@@ -67,6 +68,8 @@ def _normalize_model_ref(model: Any) -> dict[str, str] | None:
 
 
 def create_task(project_name: str, mode: str, message: str,
+                commit_prompt: str | None = None,
+                fallback_sync: bool = True,
                 model: dict | None = None,
                 max_loops: int = 10, task_id: str | None = None) -> dict:
     """Create a new task definition."""
@@ -78,6 +81,7 @@ def create_task(project_name: str, mode: str, message: str,
     if int(max_loops) <= 0:
         raise ValueError("max_loops must be > 0")
     normalized_model = _normalize_model_ref(model)
+    normalized_commit_prompt = str(commit_prompt or "").strip() or None
 
     tid = task_id or f"task-{str(uuid.uuid4())[:8]}"
 
@@ -92,6 +96,8 @@ def create_task(project_name: str, mode: str, message: str,
         "mode": normalized_mode,
         "status": "pending",
         "message": message,
+        "commit_prompt": normalized_commit_prompt,
+        "fallback_sync": bool(fallback_sync),
         "model": normalized_model,
         "current_account_id": None,
         "current_session_id": None,
@@ -127,6 +133,10 @@ def update_task(project_name: str, task_id: str, updates: dict) -> dict | None:
         return None
     if "model" in updates:
         updates["model"] = _normalize_model_ref(updates.get("model"))
+    if "commit_prompt" in updates:
+        updates["commit_prompt"] = str(updates.get("commit_prompt") or "").strip() or None
+    if "fallback_sync" in updates:
+        updates["fallback_sync"] = bool(updates.get("fallback_sync"))
     prev_status = task.get("status")
     prev_error = task.get("error")
     task.update(updates)
@@ -294,7 +304,7 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
     active_statuses = {
         "running", "monitoring", "pending", "switching",
         "syncing", "pushing", "acquiring_account", "auto_registering_account",
-        "bootstrapping_runtime", "creating_session", "sending_message",
+        "bootstrapping_runtime", "creating_session", "sending_message", "submitting_commit",
     }
     if str(task.get("status") or "").lower() in active_statuses and is_task_running(task_id):
         raise ValueError("Task is running; stop it before creating a manual session")
@@ -375,6 +385,83 @@ async def create_empty_session(project_name: str, task_id: str) -> dict:
         "session_id": session_id,
         "session_index": next_session_index,
         "session_file": f"session-{next_session_index}.md",
+        "account_id": account["id"],
+        "account_email": account["email"],
+    }
+
+
+async def switch_task_account(project_name: str, task_id: str) -> dict:
+    """Switch the task to a new account (auto-selected by pool).
+
+    Releases the current account and acquires a fresh one.
+    Does NOT create a new session — the next send will bootstrap one.
+    """
+    task = get_task(project_name, task_id)
+    if not task:
+        raise ValueError(f"Task {task_id} not found")
+
+    active_statuses = {
+        "running", "monitoring", "pending", "switching",
+        "syncing", "pushing", "acquiring_account", "auto_registering_account",
+        "bootstrapping_runtime", "creating_session", "sending_message", "submitting_commit",
+    }
+    if str(task.get("status") or "").lower() in active_statuses and is_task_running(task_id):
+        raise ValueError("Task is running; stop it before switching account")
+
+    # Clean up any stale locks previously left on this task.
+    account_pool.release_task_locks(task_id)
+
+    # Release current account
+    old_account_id = str(task.get("current_account_id") or "").strip()
+    if old_account_id:
+        account_pool.release_account(old_account_id)
+
+    # Acquire new account (exclude used ones)
+    exclude_ids = list(task.get("used_account_ids", []))
+    account = account_pool.acquire_account(exclude_ids=exclude_ids, task_id=task_id)
+
+    if not account:
+        # Try auto-register
+        auto_reg_enabled = str(
+            os.environ.get("NODEOPS_TASK_AUTO_REGISTER_ON_NO_ACCOUNT", "true")
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        if auto_reg_enabled:
+            await _auto_register_one_account(task_id)
+            account = account_pool.acquire_account(exclude_ids=exclude_ids, task_id=task_id)
+
+    if not account:
+        raise ValueError("No available accounts")
+
+    # Keep only the new account lock for this task.
+    account_pool.release_task_locks(task_id, keep_account_id=account["id"])
+
+    used_ids = list(task.get("used_account_ids", []))
+    if account["id"] not in used_ids:
+        used_ids.append(account["id"])
+
+    update_task(project_name, task_id, {
+        "current_account_id": account["id"],
+        "current_runtime_host": None,
+        "current_project_token": None,
+        # Account switch invalidates the previous upstream session binding.
+        # Next send will bootstrap a fresh deployment/session.
+        "current_session_id": None,
+        "used_account_ids": used_ids,
+        "error": None,
+    })
+
+    _emit_task_event(task_id, "account_switched", {
+        "project": project_name,
+        "task_id": task_id,
+        "account_id": account["id"],
+        "account_email": account["email"],
+    })
+
+    logger.info(
+        "Task %s switched account: old=%s new=%s (%s)",
+        task_id, old_account_id or "(none)", account["id"], account["email"],
+    )
+    return {
         "account_id": account["id"],
         "account_email": account["email"],
     }
@@ -666,14 +753,26 @@ async def ensure_task_runtime_for_send(
     return {"runtime_host": runtime_host, "project_token": project_token}
 
 
-async def _wait_runtime_healthy(runtime_host: str, timeout: float = 30.0, interval: float = 1.5) -> bool:
+async def _wait_runtime_healthy(
+    runtime_host: str,
+    project_token: str,
+    auth_token: str,
+    timeout: float = 30.0,
+    interval: float = 1.5,
+) -> bool:
     """Poll GET /health until {"ok":true} or timeout."""
     import time as _time
     req_timeout_s = float(os.environ.get("NODEOPS_RUNTIME_HEALTH_REQUEST_TIMEOUT_S", "4"))
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
         try:
-            data = await noc.get_health(runtime_host, retries=1, timeout_s=req_timeout_s)
+            data = await noc.get_health(
+                runtime_host,
+                project_token=project_token,
+                auth_token=auth_token,
+                retries=1,
+                timeout_s=req_timeout_s,
+            )
             if isinstance(data, dict) and data.get("ok"):
                 return True
         except Exception:
@@ -752,6 +851,8 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
         if _health_wait_enabled():
             ok = await _wait_runtime_healthy(
                 runtime_host,
+                project_token=project_token,
+                auth_token=auth_token,
                 timeout=_health_wait_seconds(),
                 interval=_health_poll_seconds(),
             )
@@ -769,6 +870,8 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
         if _health_wait_enabled():
             ok = await _wait_runtime_healthy(
                 runtime_host,
+                project_token=project_token,
+                auth_token=auth_token,
                 timeout=_health_wait_seconds(),
                 interval=_health_poll_seconds(),
             )
@@ -790,6 +893,8 @@ async def _ensure_deployment(account: dict, prompt: str | None = None) -> dict:
             if _health_wait_enabled():
                 ok = await _wait_runtime_healthy(
                     runtime_host,
+                    project_token=project_token,
+                    auth_token=auth_token,
                     timeout=_health_wait_seconds(),
                     interval=_health_poll_seconds(),
                 )
@@ -875,15 +980,16 @@ async def _auto_register_one_account(task_id: str) -> bool:
 
 async def _monitor_session(project_name: str, task_id: str, task: dict,
                            account: dict, runtime_host: str,
-                           project_token: str, session_id: str) -> str:
+                           project_token: str, session_id: str,
+                           override_idle_timeout: int | None = None) -> str:
     """Monitor a running session with SSE + polling fallback.
 
     Returns: "completed" | "credit_exhausted" | "stuck_idle" | "error" | "canceled"
     """
     auth_token = account["auth_token"]
-    last_message_count = 0
+    last_rendered_rows: list[dict[str, str]] = []
     poll_interval = 5  # seconds
-    idle_timeout_seconds = 120
+    idle_timeout_seconds = int(override_idle_timeout or 120)
     kickoff_timeout_seconds = max(
         5, int(os.environ.get("NODEOPS_SESSION_KICKOFF_TIMEOUT_SECONDS", "20"))
     )
@@ -928,47 +1034,49 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                     runtime_host, project_token, auth_token, session_id
                 )
                 messages = _normalize_messages(messages_data)
+                for msg in messages:
+                    role = _normalize_chat_role(_extract_message_role(msg))
+                    if role != "user" and _payload_indicates_credit_exhausted(msg):
+                        return "credit_exhausted"
 
                 # Cache messages
                 _message_cache[task_id] = messages
 
-                # Record new messages
-                if len(messages) > last_message_count:
-                    for msg in messages[last_message_count:]:
-                        role = _normalize_chat_role(_extract_message_role(msg))
-                        content = _extract_message_text(msg).strip()
-                        if role != "user" and _payload_indicates_credit_exhausted(msg):
-                            return "credit_exhausted"
-                        if not content:
-                            continue
-                        if role not in {"user", "assistant"}:
-                            continue
-                        # Outbound prompt is already persisted at send-time.
-                        if role == "user":
-                            continue
-                        session_recorder.append_message(
-                            project_name, task_id, account["email"],
-                            task["session_index"], role, content
-                        )
-                        _emit_task_event(task_id, "message", {
-                            "session_id": session_id,
-                            "session_index": task.get("session_index", 0),
-                            "role": role,
-                            "content": content,
-                        })
-                    last_message_count = len(messages)
+                rendered_rows = _render_runtime_chat_rows(messages)
+                if rendered_rows != last_rendered_rows:
+                    _rewrite_session_messages_snapshot(
+                        project_name=project_name,
+                        task_id=task_id,
+                        session_index=int(task.get("session_index", 0)),
+                        rows=rendered_rows,
+                    )
+                    _emit_assistant_row_updates(
+                        task_id=task_id,
+                        session_id=session_id,
+                        session_index=int(task.get("session_index", 0)),
+                        previous_rows=last_rendered_rows,
+                        current_rows=rendered_rows,
+                    )
+                    last_rendered_rows = rendered_rows
                     last_activity_at = time.monotonic()
                     transient_errors = 0
+                    # New assistant activity: force next-loop credit refresh.
+                    last_credit_check_at = 0.0
                 else:
                     sse_last = float(sse_state.get("last_activity_at", 0.0) or 0.0)
                     effective_activity = max(last_activity_at, sse_last)
                     if (
-                        last_message_count > 1
+                        len(last_rendered_rows) > 1
                         and (time.monotonic() - effective_activity) >= idle_timeout_seconds
                     ):
                         credit_status = await credit_monitor.check_credits(
                             auth_token, account["id"]
                         )
+                        _emit_task_event(task_id, "credits_updated", {
+                            "credits_remaining": credit_status.get("credits_remaining"),
+                            "exhausted": bool(credit_status.get("exhausted", False)),
+                            "account_id": account["id"],
+                        })
                         if credit_status["exhausted"]:
                             return "credit_exhausted"
                         return "completed"
@@ -976,7 +1084,7 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                 # Upstream may accept message but stay idle forever (no busy, no assistant).
                 # Switch account early instead of waiting for long idle timeout.
                 if (
-                    last_message_count <= 1
+                    len(last_rendered_rows) <= 1
                     and not sse_state.get("busy_seen")
                     and str(sse_state.get("last_status") or "").lower() == "idle"
                     and (time.monotonic() - monitor_started_at) >= kickoff_timeout_seconds
@@ -1011,6 +1119,11 @@ async def _monitor_session(project_name: str, task_id: str, task: dict,
                     credit_status = await credit_monitor.check_credits(
                         auth_token, account["id"]
                     )
+                    _emit_task_event(task_id, "credits_updated", {
+                        "credits_remaining": credit_status.get("credits_remaining"),
+                        "exhausted": bool(credit_status.get("exhausted", False)),
+                        "account_id": account["id"],
+                    })
                     if credit_status["exhausted"]:
                         return "credit_exhausted"
                 except Exception:
@@ -1166,6 +1279,93 @@ def _normalize_messages(messages_data: Any) -> list[dict]:
     return []
 
 
+def _render_runtime_chat_rows(messages: list[dict]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for msg in messages:
+        role = _normalize_chat_role(_extract_message_role(msg))
+        content = _extract_message_text(msg).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        row = {"role": role, "content": content}
+        prev = out[-1] if out else None
+        if prev and prev["role"] == row["role"] and prev["content"] == row["content"]:
+            continue
+        if prev and prev["role"] == "user" and row["role"] == "assistant" and prev["content"] == row["content"]:
+            continue
+        out.append(row)
+    return out
+
+
+def _emit_assistant_row_updates(
+    task_id: str,
+    session_id: str,
+    session_index: int,
+    previous_rows: list[dict[str, str]],
+    current_rows: list[dict[str, str]],
+):
+    for idx, row in enumerate(current_rows):
+        if row.get("role") != "assistant":
+            continue
+        prev = previous_rows[idx] if idx < len(previous_rows) else None
+        if prev and prev.get("role") == "assistant" and prev.get("content") == row.get("content"):
+            continue
+        payload = {
+            "session_id": session_id,
+            "session_index": session_index,
+            "role": "assistant",
+            "content": row.get("content", ""),
+        }
+        if prev is not None:
+            payload["updated"] = True
+        _emit_task_event(task_id, "message", payload)
+
+
+def _rewrite_session_messages_snapshot(
+    project_name: str,
+    task_id: str,
+    session_index: int,
+    rows: list[dict[str, str]],
+):
+    path = session_md_path(project_name, task_id, session_index)
+    if not path.exists():
+        return
+
+    raw = path.read_text(encoding="utf-8")
+    marker = "## Messages"
+    if marker in raw:
+        idx = raw.find(marker)
+        marker_end = raw.find("\n", idx)
+        if marker_end == -1:
+            header = raw.rstrip("\n") + "\n"
+        else:
+            header = raw[: marker_end + 1]
+        if not header.endswith("\n\n"):
+            if header.endswith("\n"):
+                header += "\n"
+            else:
+                header += "\n\n"
+    else:
+        header = raw.rstrip("\n")
+        if header:
+            header += "\n\n"
+        header += "## Messages\n\n"
+
+    body_lines: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(row.get("content") or "").rstrip()
+        if not content:
+            continue
+        role_tag = "User" if role == "user" else "Assistant"
+        body_lines.append(f"[{role_tag}]\n{content}\n\n")
+
+    updated = header + "".join(body_lines)
+    if updated != raw:
+        path.write_text(updated, encoding="utf-8")
+
+
 def _emit_task_event(task_id: str, event_type: str, data: dict[str, Any]):
     seq = int(_task_event_seq.get(task_id, 0)) + 1
     _task_event_seq[task_id] = seq
@@ -1221,6 +1421,459 @@ def _payload_indicates_credit_exhausted(payload: Any) -> bool:
     return False
 
 
+def _extract_runtime_session_id(session_data: Any) -> str:
+    if not isinstance(session_data, dict):
+        return ""
+    return (
+        str(session_data.get("id") or "")
+        or str(session_data.get("sessionId") or "")
+        or str(session_data.get("session_id") or "")
+    ).strip()
+
+
+def _helper_session_md_path(project_name: str, task_id: str, session_index: int):
+    base = session_md_path(project_name, task_id, session_index)
+    return base.with_name(f"session-{session_index}-git.md")
+
+
+def _init_helper_session_file(
+    project_name: str,
+    task_id: str,
+    account_email: str,
+    session_index: int,
+    nodeops_session_id: str,
+):
+    path = _helper_session_md_path(project_name, task_id, session_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        f"# Session {session_index} Git - {task_id}\n"
+        f"- Account: {account_email}\n"
+        f"- NodeOps Session ID: {nodeops_session_id}\n"
+        f"- Started: {now_iso()}\n"
+        f"- End Reason: (in progress)\n"
+        f"\n## Messages\n\n"
+    )
+    path.write_text(header, encoding="utf-8")
+    return path
+
+
+def _rewrite_helper_session_messages_snapshot(path, rows: list[dict[str, str]]):
+    if not path.exists():
+        return
+    raw = path.read_text(encoding="utf-8")
+    marker = "## Messages"
+    if marker in raw:
+        idx = raw.find(marker)
+        marker_end = raw.find("\n", idx)
+        if marker_end == -1:
+            header = raw.rstrip("\n") + "\n"
+        else:
+            header = raw[: marker_end + 1]
+        if not header.endswith("\n\n"):
+            if header.endswith("\n"):
+                header += "\n"
+            else:
+                header += "\n\n"
+    else:
+        header = raw.rstrip("\n")
+        if header:
+            header += "\n\n"
+        header += "## Messages\n\n"
+
+    body_lines: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(row.get("content") or "").rstrip()
+        if not content:
+            continue
+        role_tag = "User" if role == "user" else "Assistant"
+        body_lines.append(f"[{role_tag}]\n{content}\n\n")
+    updated = header + "".join(body_lines)
+    if updated != raw:
+        path.write_text(updated, encoding="utf-8")
+
+
+def _finalize_helper_session_file(path, end_reason: str):
+    if not path.exists():
+        return
+    raw = path.read_text(encoding="utf-8")
+    updated = raw.replace(
+        "- End Reason: (in progress)",
+        f"- Ended: {now_iso()}\n- End Reason: {end_reason}",
+    )
+    if updated != raw:
+        path.write_text(updated, encoding="utf-8")
+
+
+async def _monitor_helper_session(
+    task_id: str,
+    account: dict,
+    runtime_host: str,
+    project_token: str,
+    session_id: str,
+    helper_md_path,
+    idle_timeout_seconds: int = 300,
+    max_seconds: int = 600,
+) -> str:
+    """
+    Side-effect-free helper monitor:
+    - does NOT touch main session markdown
+    - does NOT update task message cache
+    - does NOT emit assistant stream events
+    """
+    auth_token = account["auth_token"]
+    poll_interval = 5
+    started_at = time.monotonic()
+    last_activity_at = started_at
+    last_credit_check_at = 0.0
+    transient_errors = 0
+    last_rows: list[dict[str, str]] = []
+
+    while (time.monotonic() - started_at) < max_seconds:
+        if _stop_events.get(task_id, asyncio.Event()).is_set():
+            return "canceled"
+        try:
+            messages_data = await noc.get_messages(
+                runtime_host, project_token, auth_token, session_id
+            )
+            messages = _normalize_messages(messages_data)
+
+            for msg in messages:
+                role = _normalize_chat_role(_extract_message_role(msg))
+                if role != "user" and _payload_indicates_credit_exhausted(msg):
+                    return "credit_exhausted"
+
+            rows = _render_runtime_chat_rows(messages)
+            if rows != last_rows:
+                _rewrite_helper_session_messages_snapshot(helper_md_path, rows)
+                last_rows = rows
+                last_activity_at = time.monotonic()
+                transient_errors = 0
+            else:
+                if len(last_rows) > 1 and (time.monotonic() - last_activity_at) >= idle_timeout_seconds:
+                    try:
+                        credit_status = await credit_monitor.check_credits(
+                            auth_token, account["id"]
+                        )
+                        if credit_status["exhausted"]:
+                            return "credit_exhausted"
+                    except Exception:
+                        pass
+                    return "completed"
+        except Exception as exc:
+            transient_errors += 1
+            if credit_monitor.is_credit_error(str(exc)):
+                return "credit_exhausted"
+            if transient_errors > 10:
+                logger.warning("Task %s: helper monitor failed too many times: %s", task_id, exc)
+                return "error"
+
+        now = time.monotonic()
+        if (now - last_credit_check_at) >= 30:
+            last_credit_check_at = now
+            try:
+                credit_status = await credit_monitor.check_credits(auth_token, account["id"])
+                if credit_status["exhausted"]:
+                    return "credit_exhausted"
+            except Exception:
+                pass
+
+        await asyncio.sleep(poll_interval)
+
+    return "timeout"
+
+
+def _finalize_credit_exhausted_switch(
+    project_name: str,
+    task_id: str,
+    task: dict,
+    account: dict,
+    end_reason: str,
+    git_commit: str | None,
+):
+    used_ids = list(task.get("used_account_ids", []))
+    if account["id"] not in used_ids:
+        used_ids.append(account["id"])
+    account_pool.release_account(account["id"], exhausted=True)
+
+    loops = list(task.get("loops", []))
+    loops.append({
+        "index": int(task.get("loop_count", 0)) + 1,
+        "account_email": account["email"],
+        "session_id": task.get("current_session_id"),
+        "started_at": task.get("updated_at"),
+        "ended_at": now_iso(),
+        "end_reason": end_reason,
+        "git_commit": git_commit,
+    })
+
+    update_task(project_name, task_id, {
+        "loop_count": int(task.get("loop_count", 0)) + 1,
+        "used_account_ids": used_ids,
+        "loops": loops,
+        "status": "switching",
+        "current_account_id": None,
+        "current_session_id": None,
+        "error": None,
+    })
+
+
+async def _run_git(
+    cwd: Path,
+    *args: str,
+) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return (
+        int(proc.returncode or 0),
+        stdout.decode(errors="ignore"),
+        stderr.decode(errors="ignore"),
+    )
+
+
+def _context_session_paths_for_task(repo_root: Path, task_id: str) -> list[Path]:
+    task_dir = repo_root / ".nodeops" / task_id
+    if not task_dir.exists():
+        return []
+    out: list[Path] = []
+    for path in sorted(task_dir.glob("session-*.md")):
+        if not path.is_file():
+            continue
+        # Exclude helper session logs: session-<index>-git.md
+        if path.name.endswith("-git.md"):
+            continue
+        out.append(path)
+    return out
+
+
+async def _push_task_context_sessions(
+    project_name: str,
+    task_id: str,
+    loop_index: int,
+    end_reason: str,
+) -> tuple[bool, str | None, str | None]:
+    """
+    Push only .nodeops session markdown files for current task before switching account.
+
+    Includes:
+      - .nodeops/<task_id>/session-*.md
+    Excludes:
+      - .nodeops/<task_id>/session-*-git.md
+      - any task json / code files
+    """
+    root = repo_dir(project_name)
+    if not (root / ".git").exists():
+        return False, None, f"Not a git repository: {root}"
+
+    paths = _context_session_paths_for_task(root, task_id)
+    if not paths:
+        return True, None, None
+
+    rel_paths = [p.relative_to(root).as_posix() for p in paths]
+
+    rc, _, err = await _run_git(root, "add", "--", *rel_paths)
+    if rc != 0:
+        return False, None, f"git add failed: {err.strip() or 'unknown error'}"
+
+    rc, staged_out, staged_err = await _run_git(root, "diff", "--cached", "--name-only", "--", *rel_paths)
+    if rc != 0:
+        return False, None, f"git diff --cached failed: {(staged_err or staged_out).strip() or 'unknown error'}"
+    if not staged_out.strip():
+        return True, None, None
+
+    commit_msg = (
+        f"task {task_id} loop {loop_index} "
+        f"{end_reason}: sync nodeops session context"
+    )
+    rc, commit_out, commit_err = await _run_git(
+        root, "commit", "-m", commit_msg, "--", *rel_paths
+    )
+    commit_text = f"{commit_out}\n{commit_err}".lower()
+    if rc != 0:
+        if "nothing to commit" in commit_text:
+            return True, None, None
+        return False, None, f"git commit failed: {(commit_err or commit_out).strip() or 'unknown error'}"
+
+    rc, head_out, head_err = await _run_git(root, "rev-parse", "HEAD")
+    if rc != 0:
+        return False, None, f"git rev-parse failed: {(head_err or head_out).strip() or 'unknown error'}"
+    commit_hash = head_out.strip() or None
+
+    rc, push_out, push_err = await _run_git(root, "push")
+    if rc == 0:
+        return True, commit_hash, None
+
+    push_text = f"{push_out}\n{push_err}".lower()
+    if "non-fast-forward" in push_text or "fetch first" in push_text:
+        rc_pull, pull_out, pull_err = await _run_git(root, "pull", "--rebase")
+        if rc_pull != 0:
+            return False, commit_hash, (
+                "git push rejected (non-fast-forward) and git pull --rebase failed: "
+                f"{(pull_err or pull_out).strip() or 'unknown error'}"
+            )
+        rc_retry, retry_out, retry_err = await _run_git(root, "push")
+        if rc_retry == 0:
+            return True, commit_hash, None
+        return False, commit_hash, (
+            "git push failed after rebase: "
+            f"{(retry_err or retry_out).strip() or 'unknown error'}"
+        )
+
+    return False, commit_hash, f"git push failed: {(push_err or push_out).strip() or 'unknown error'}"
+
+
+async def _get_remote_head(project_name: str) -> str | None:
+    """Read remote origin HEAD hash (or None when unavailable)."""
+    cwd = str(repo_dir(project_name))
+    if not os.path.exists(os.path.join(cwd, ".git")):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "ls-remote",
+            "origin",
+            "HEAD",
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        line = stdout.decode(errors="ignore").strip()
+        if not line:
+            return None
+        parts = line.split()
+        if not parts:
+            return None
+        return parts[0].strip() or None
+    except Exception as exc:
+        logger.warning("Failed to get remote HEAD for %s: %s", project_name, exc)
+        return None
+
+
+async def _agent_push_via_new_session(
+    project_name: str,
+    task_id: str,
+    task: dict,
+    account: dict,
+    runtime_host: str,
+    project_token: str,
+    auth_token: str,
+    commit_prompt: str,
+    timeout_seconds: int = 300,
+) -> bool:
+    """
+    Reuse current deployment, create a short-lived helper session, and ask agent
+    to commit+push. Success = remote HEAD changes; fallback = monitor completion
+    when HEAD baseline is unavailable.
+    """
+    if not runtime_host or not project_token or not auth_token:
+        logger.warning("Task %s: commit helper missing runtime context", task_id)
+        return False
+
+    old_head = await _get_remote_head(project_name)
+
+    try:
+        session_data = await noc.create_session(
+            runtime_host,
+            project_token,
+            auth_token,
+            title=f"{task_id} commit-push",
+            model=task.get("model"),
+        )
+        session_id = _extract_runtime_session_id(session_data)
+        if not session_id:
+            logger.error(
+                "Task %s: commit session created but id missing: %s",
+                task_id,
+                session_data,
+            )
+            return False
+    except Exception as exc:
+        logger.error("Task %s: create commit session failed: %s", task_id, exc)
+        return False
+
+    _emit_task_event(task_id, "commit_session_created", {
+        "project": project_name,
+        "task_id": task_id,
+        "session_id": session_id,
+        "purpose": "agent_push",
+    })
+    helper_session_index = int(task.get("session_index", 0))
+    helper_md_path = _init_helper_session_file(
+        project_name=project_name,
+        task_id=task_id,
+        account_email=account["email"],
+        session_index=helper_session_index,
+        nodeops_session_id=session_id,
+    )
+
+    try:
+        await noc.send_message(
+            runtime_host,
+            project_token,
+            auth_token,
+            session_id,
+            commit_prompt,
+            model=task.get("model"),
+        )
+    except Exception as exc:
+        logger.error("Task %s: send commit prompt failed: %s", task_id, exc)
+        return False
+
+    try:
+        end_reason = await _monitor_helper_session(
+            task_id=task_id,
+            account=account,
+            runtime_host=runtime_host,
+            project_token=project_token,
+            session_id=session_id,
+            helper_md_path=helper_md_path,
+            idle_timeout_seconds=max(30, int(timeout_seconds)),
+            max_seconds=max(120, int(timeout_seconds) * 2),
+        )
+    except Exception as exc:
+        logger.error("Task %s: monitor commit session failed: %s", task_id, exc)
+        end_reason = "error"
+    finally:
+        _finalize_helper_session_file(helper_md_path, end_reason)
+
+    new_head = await _get_remote_head(project_name)
+    if old_head and new_head and old_head != new_head:
+        logger.info(
+            "Task %s: commit helper detected remote HEAD change old=%s new=%s",
+            task_id,
+            old_head,
+            new_head,
+        )
+        return True
+
+    if old_head is None and end_reason == "completed":
+        logger.info(
+            "Task %s: commit helper completed; remote HEAD baseline unavailable",
+            task_id,
+        )
+        return True
+
+    logger.warning(
+        "Task %s: no remote commit detected after helper session (end_reason=%s old=%s new=%s)",
+        task_id,
+        end_reason,
+        old_head,
+        new_head,
+    )
+    return False
+
+
 async def _handle_credit_exhausted(project_name: str, task_id: str,
                                    task: dict, account: dict) -> str:
     """Handle credit exhaustion.
@@ -1241,37 +1894,115 @@ async def _handle_credit_exhausted(project_name: str, task_id: str,
         })
         return "blocked"
 
-    # Auto mode: sync and continue
+    commit_prompt = str(task.get("commit_prompt") or "").strip()
+    if commit_prompt:
+        update_task(project_name, task_id, {"status": "submitting_commit", "error": None})
+        runtime_host = str(
+            task.get("current_runtime_host")
+            or account.get("runtime_host")
+            or ""
+        ).strip()
+        project_token = str(
+            task.get("current_project_token")
+            or account.get("project_token")
+            or ""
+        ).strip()
+        push_success = await _agent_push_via_new_session(
+            project_name=project_name,
+            task_id=task_id,
+            task=task,
+            account=account,
+            runtime_host=runtime_host,
+            project_token=project_token,
+            auth_token=account["auth_token"],
+            commit_prompt=commit_prompt,
+            timeout_seconds=300,
+        )
+        if push_success:
+            context_ok, context_commit, context_err = await _push_task_context_sessions(
+                project_name=project_name,
+                task_id=task_id,
+                loop_index=int(task.get("loop_count", 0)) + 1,
+                end_reason="credit_exhausted_agent_pushed",
+            )
+            if not context_ok:
+                account_pool.release_account(account["id"], exhausted=True)
+                update_task(project_name, task_id, {
+                    "status": "blocked",
+                    "error": f"Context push failed before switch: {context_err}",
+                    "current_account_id": None,
+                    "current_session_id": None,
+                })
+                _emit_task_event(task_id, "context_push_failed", {
+                    "project": project_name,
+                    "task_id": task_id,
+                    "reason": "credit_exhausted_agent_pushed",
+                    "error": context_err,
+                })
+                return "blocked"
+            _finalize_credit_exhausted_switch(
+                project_name=project_name,
+                task_id=task_id,
+                task=task,
+                account=account,
+                end_reason="credit_exhausted_agent_pushed",
+                git_commit=context_commit,
+            )
+            logger.info(
+                "Task %s: helper commit session succeeded, switching account (loop %s)",
+                task_id,
+                int(task.get("loop_count", 0)) + 1,
+            )
+            return "continue"
+
+        if not bool(task.get("fallback_sync", True)):
+            account_pool.release_account(account["id"], exhausted=True)
+            update_task(project_name, task_id, {
+                "status": "blocked",
+                "error": "Agent push failed, fallback_sync disabled, waiting for manual intervention",
+                "current_account_id": None,
+                "current_session_id": None,
+            })
+            return "blocked"
+
+        logger.info("Task %s: helper commit session failed, fallback to local sync", task_id)
+
+    # Fallback path: sync workspace locally and push from local git.
     commit_hash = await _sync_and_push(project_name, task_id, task, account, "credit_exhausted")
-
-    # Release and mark account exhausted
-    used_ids = task.get("used_account_ids", [])
-    if account["id"] not in used_ids:
-        used_ids.append(account["id"])
-    account_pool.release_account(account["id"], exhausted=True)
-
-    # Record loop
-    loops = task.get("loops", [])
-    loops.append({
-        "index": task["loop_count"] + 1,
-        "account_email": account["email"],
-        "session_id": task.get("current_session_id"),
-        "started_at": task.get("updated_at"),
-        "ended_at": now_iso(),
-        "end_reason": "credit_exhausted",
-        "git_commit": commit_hash,
-    })
-
-    update_task(project_name, task_id, {
-        "loop_count": task["loop_count"] + 1,
-        "used_account_ids": used_ids,
-        "loops": loops,
-        "status": "switching",
-        "current_account_id": None,
-        "current_session_id": None,
-    })
-
-    logger.info(f"Task {task_id}: switching to next account (loop {task['loop_count'] + 1})")
+    context_ok, context_commit, context_err = await _push_task_context_sessions(
+        project_name=project_name,
+        task_id=task_id,
+        loop_index=int(task.get("loop_count", 0)) + 1,
+        end_reason="credit_exhausted",
+    )
+    if not context_ok:
+        account_pool.release_account(account["id"], exhausted=True)
+        update_task(project_name, task_id, {
+            "status": "blocked",
+            "error": f"Context push failed before switch: {context_err}",
+            "current_account_id": None,
+            "current_session_id": None,
+        })
+        _emit_task_event(task_id, "context_push_failed", {
+            "project": project_name,
+            "task_id": task_id,
+            "reason": "credit_exhausted",
+            "error": context_err,
+        })
+        return "blocked"
+    _finalize_credit_exhausted_switch(
+        project_name=project_name,
+        task_id=task_id,
+        task=task,
+        account=account,
+        end_reason="credit_exhausted",
+        git_commit=context_commit or commit_hash,
+    )
+    logger.info(
+        "Task %s: switching to next account after credit_exhausted fallback (loop %s)",
+        task_id,
+        int(task.get("loop_count", 0)) + 1,
+    )
     return "continue"
 
 
@@ -1291,6 +2022,28 @@ async def _handle_stuck_idle(project_name: str, task_id: str,
         })
         return "blocked"
 
+    context_ok, context_commit, context_err = await _push_task_context_sessions(
+        project_name=project_name,
+        task_id=task_id,
+        loop_index=int(task.get("loop_count", 0)) + 1,
+        end_reason="stuck_idle",
+    )
+    if not context_ok:
+        account_pool.release_account(account["id"], exhausted=True)
+        update_task(project_name, task_id, {
+            "status": "blocked",
+            "error": f"Context push failed before switch: {context_err}",
+            "current_account_id": None,
+            "current_session_id": None,
+        })
+        _emit_task_event(task_id, "context_push_failed", {
+            "project": project_name,
+            "task_id": task_id,
+            "reason": "stuck_idle",
+            "error": context_err,
+        })
+        return "blocked"
+
     used_ids = task.get("used_account_ids", [])
     if account["id"] not in used_ids:
         used_ids.append(account["id"])
@@ -1304,7 +2057,7 @@ async def _handle_stuck_idle(project_name: str, task_id: str,
         "started_at": task.get("updated_at"),
         "ended_at": now_iso(),
         "end_reason": "stuck_idle",
-        "git_commit": None,
+        "git_commit": context_commit,
     })
 
     update_task(project_name, task_id, {
@@ -1375,13 +2128,121 @@ def _extract_message_text(msg: dict) -> str:
 
     parts = msg.get("parts", msg.get("content", []))
     if isinstance(parts, list):
-        texts = []
+        texts: list[str] = []
+
+        def _to_text(value: Any, limit: int = 0) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (dict, list)):
+                raw = json.dumps(value, ensure_ascii=False)
+            else:
+                raw = str(value)
+            raw = raw.strip()
+            if limit and len(raw) > limit:
+                return raw[:limit] + "..."
+            return raw
+
         for part in parts:
-            if isinstance(part, dict) and part.get("type") == "text":
-                texts.append(part.get("text", ""))
-            elif isinstance(part, str):
-                texts.append(part)
-        joined = "\n".join([t for t in texts if str(t).strip()])
+            if isinstance(part, str):
+                plain = part.strip()
+                if plain:
+                    texts.append(plain)
+                continue
+            if not isinstance(part, dict):
+                continue
+
+            ptype = str(part.get("type") or "").strip().lower().replace("_", "-")
+            if ptype == "text":
+                txt = _to_text(part.get("text"))
+                if txt:
+                    texts.append(txt)
+            elif ptype == "tool":
+                invocation = part.get("toolInvocation")
+                if not isinstance(invocation, dict):
+                    invocation = {}
+
+                name = _to_text(
+                    invocation.get("toolName")
+                    or invocation.get("tool_name")
+                    or part.get("toolName")
+                    or "tool"
+                )
+                state = str(invocation.get("state") or "").strip().lower()
+                label = _to_text(invocation.get("label"))
+                duration = invocation.get("durationMs")
+                is_error = bool(invocation.get("isError", False))
+
+                args_txt = _to_text(invocation.get("args"), limit=300)
+
+                result_txt = ""
+                result = invocation.get("result")
+                if isinstance(result, dict):
+                    result_content = result.get("content")
+                    if isinstance(result_content, list):
+                        result_parts: list[str] = []
+                        for rc in result_content:
+                            if isinstance(rc, dict):
+                                rc_txt = _to_text(rc.get("text") or rc.get("content"))
+                                if rc_txt:
+                                    result_parts.append(rc_txt)
+                            elif isinstance(rc, str):
+                                rc_txt = rc.strip()
+                                if rc_txt:
+                                    result_parts.append(rc_txt)
+                        result_txt = "\n".join([r for r in result_parts if r]).strip()
+                    elif isinstance(result_content, str):
+                        result_txt = result_content.strip()
+                    if not result_txt:
+                        result_txt = _to_text(result, limit=500)
+                elif result is not None:
+                    result_txt = _to_text(result, limit=500)
+
+                header = f"[Tool: {name}]"
+                if state:
+                    header += f" [{state}]"
+                if duration:
+                    header += f" ({duration}ms)"
+                if is_error:
+                    header += " ERROR"
+
+                lines = [header]
+                if args_txt:
+                    lines.append(args_txt)
+                if result_txt:
+                    lines.append(f"Result:\n{result_txt[:500]}")
+                elif label:
+                    lines.append(label)
+                texts.append("\n".join([line for line in lines if line]))
+            elif ptype == "tool-use":
+                name = _to_text(part.get("name") or part.get("toolName") or part.get("tool_name") or "tool")
+                inp = part.get("input")
+                if inp is None:
+                    inp = part.get("args")
+                inp_txt = _to_text(inp, limit=200)
+                if inp_txt:
+                    texts.append(f"[Tool: {name}]\n{inp_txt}")
+                else:
+                    texts.append(f"[Tool: {name}]")
+            elif ptype == "tool-result":
+                name = _to_text(part.get("name") or part.get("toolName") or part.get("tool_name") or "tool")
+                out = part.get("output")
+                if out is None:
+                    out = part.get("content")
+                if out is None:
+                    out = part.get("text")
+                out_txt = _to_text(out, limit=300)
+                if out_txt:
+                    texts.append(f"[Tool Result: {name}]\n{out_txt}")
+                else:
+                    texts.append(f"[Tool Result: {name}]")
+            elif ptype in {"step-finish", "step-start"}:
+                continue
+            else:
+                fallback = _to_text(part.get("text") or part.get("content"))
+                if fallback:
+                    texts.append(f"[{ptype or 'part'}] {fallback}")
+
+        joined = "\n\n".join([t for t in texts if str(t).strip()])
         if joined.strip():
             return joined
 

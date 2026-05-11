@@ -24,7 +24,7 @@ export default function StatusBar() {
     [
       'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
       'acquiring_account', 'auto_registering_account',
-      'bootstrapping_runtime', 'creating_session', 'sending_message',
+      'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
     ].includes(t.status)
   ).length;
   const totalTasks        = overview.total_tasks        ?? Object.values(tasks).flat().length;

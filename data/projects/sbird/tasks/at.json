@@ -1,0 +1,31 @@
+{
+  "id": "at",
+  "project": "sbird",
+  "mode": "oneshot",
+  "status": "canceled",
+  "message": "gitpat密钥为ghp_REDACTED\nhttps://github.com/dfg55666/sbird 你帮我克隆这个项目为Sbird文件夹，你有最高决策权，注意文件架构保持优雅可以新增合理的文件架构。不用启动子代理。阅读根目录task文件夹里的文档快速了解前端架构。\n@ 提及面板需要重构修复，目前好像是一点击就消失，根本没法选择，样式也特别丑",
+  "model": {
+    "providerID": "openrouter",
+    "modelID": "anthropic/claude-sonnet-4.6"
+  },
+  "current_account_id": "b8eb2173-7f35-4ea4-b44e-8db02e90fa1a",
+  "current_session_id": "6970c2c3-8c63-48c5-ab2b-8d50d153c9dc",
+  "current_runtime_host": "upbeat-dewdney2-869178.orak.nodeops.app",
+  "current_project_token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNmU4YzQ1NWUtMzI1NS00MmNjLWFhODYtN2Q2M2NlYjM0OGM3IiwiZGVwbG95bWVudF9pZCI6ImZiMDlmNTIxLWQ4MGUtNDZiOS04M2FmLTU5ZGRlOTQ5MzJkMyIsImlzcyI6InZpYmUtY29kZXItYmUiLCJhdWQiOiJmYjA5ZjUyMS1kODBlLTQ2YjktODNhZi01OWRkZTk0OTMyZDMiLCJleHAiOjE3ODEwOTIzMDIsImlhdCI6MTc3ODUwMDMwMiwibmJmIjoxNzc4NTAwMzAyLCJqdGkiOiIwMzA5NzAwYy0xOTQ2LTQzNGEtOGMwOS05NGY5MzU0NWFiZGMifQ.VN-n3P77coxfG16jAhAOXvPq3fopq5FbOqsMLkH8TzBfoGMppd21QOQYN_b-6zgGLelZACFWNtppmvW_LhA2Jg",
+  "loop_count": 0,
+  "max_loops": 1,
+  "session_index": 4,
+  "used_account_ids": [
+    "32b411f5-f029-4c54-a24b-e2ceb6bea48f",
+    "0ed016e5-4561-42ef-b428-a2e5860c5c95",
+    "5489be69-42db-4da9-bbdb-03b6eaac146d",
+    "057fb25d-c2f1-4b65-99af-20b96f179e44",
+    "f51e819d-0e80-482e-b83c-4168a9212301",
+    "d31524fd-e204-4595-a02a-7de2bbfe7727",
+    "b8eb2173-7f35-4ea4-b44e-8db02e90fa1a"
+  ],
+  "loops": [],
+  "error": null,
+  "created_at": "2026-05-10T14:44:24.828402+00:00",
+  "updated_at": "2026-05-11T11:51:50.812471+00:00"
+}

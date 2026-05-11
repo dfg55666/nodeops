@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   RefreshCw, MessageSquare, User, Bot,
   ChevronDown, ChevronUp, Copy, Check, Send, ImagePlus, X,
-  ChevronRight, Folder, File, AlertCircle,
+  ChevronRight, Folder, File, AlertCircle, Download, Repeat,
 } from 'lucide-react';
 import useAppStore from '../stores/appStore';
 import useDataStore from '../stores/dataStore';
@@ -263,31 +263,54 @@ function MessageBubble({ segment }) {
   );
 }
 
-function FileNode({ node, accountId, depth = 0 }) {
+function FileNode({ node, projectName, taskId, accountId, depth = 0 }) {
   const [open, setOpen] = useState(false);
+  const [children, setChildren] = useState(Array.isArray(node.children) ? node.children : null);
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const isDir = node.type === 'directory' || node.is_dir === true || Array.isArray(node.children);
+  const nodePath = node.path || node.name || '';
   const indent = depth * 16 + 8;
 
   const handleClick = async () => {
     if (isDir) {
-      setOpen((v) => !v);
+      const willOpen = !open;
+      setOpen(willOpen);
+      if (willOpen && children === null) {
+        try {
+          setLoading(true);
+          let res;
+          if (projectName && taskId) {
+            res = await api.getTaskFileTreeWithAccount(projectName, taskId, accountId || '', nodePath);
+          } else if (accountId) {
+            res = await api.getFileTree(accountId, nodePath);
+          } else {
+            setChildren([]);
+            return;
+          }
+          const nodes = res?.data ?? res ?? [];
+          setChildren(Array.isArray(nodes) ? nodes : []);
+        } catch (e) {
+          showToast(`Failed to load directory: ${e.message}`, 'error');
+          setChildren([]);
+        } finally {
+          setLoading(false);
+        }
+      }
       return;
     }
     if (content !== null) {
       setContent(null);
       return;
     }
-    if (!accountId) {
-      showToast('No account for workspace', 'error');
-      return;
-    }
     try {
       setLoading(true);
-      const res = await api.getFileContent(accountId, node.path || node.name);
+      const res = (projectName && taskId)
+        ? await api.getTaskFileContent(projectName, taskId, nodePath, accountId || '')
+        : await api.getFileContent(accountId, nodePath);
       if (res?.is_binary) {
         setContent('[binary file]');
       } else {
@@ -297,6 +320,35 @@ function FileNode({ node, accountId, depth = 0 }) {
       showToast(`Failed to load file: ${e.message}`, 'error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDownload = async (e) => {
+    e.stopPropagation();
+    if (!projectName && !taskId && !accountId) {
+      showToast('No account for workspace', 'error');
+      return;
+    }
+    if (!nodePath) {
+      showToast('Invalid file path', 'error');
+      return;
+    }
+    try {
+      setDownloading(true);
+      const res = (projectName && taskId)
+        ? await api.downloadTaskWorkspacePath(projectName, taskId, nodePath, isDir, accountId || '')
+        : await api.downloadWorkspacePath(accountId, nodePath, isDir);
+      const savedTo = res?.data?.saved_to || '';
+      const savedCount = Number(res?.data?.saved_count || 0);
+      if (isDir) {
+        showToast(`Saved ${savedCount} files to ${savedTo}`, 'success');
+      } else {
+        showToast(`Saved to ${savedTo}`, 'success');
+      }
+    } catch (err) {
+      showToast(`Save failed: ${err.message}`, 'error');
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -346,6 +398,23 @@ function FileNode({ node, accountId, depth = 0 }) {
           color: isDir ? '#475569' : '#4b5563',
         }}>
           {node.name}
+        </span>
+        <span
+          onClick={handleDownload}
+          title={isDir ? 'Save folder to local download/' : 'Save file to local download/'}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: downloading ? '#00a888' : '#64748b',
+            cursor: downloading ? 'wait' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            padding: 2,
+            flexShrink: 0,
+            pointerEvents: downloading ? 'none' : 'auto',
+          }}
+        >
+          <Download size={10} />
         </span>
         {loading && <RefreshCw size={9} style={{ color: '#00a888', animation: 'spin 1s linear infinite', flexShrink: 0 }} />}
       </button>
@@ -397,27 +466,63 @@ function FileNode({ node, accountId, depth = 0 }) {
 
       {isDir && open && (
         <>
-          {(node.children || []).map((child, i) => (
-            <FileNode key={i} node={child} accountId={accountId} depth={depth + 1} />
+          {loading && children === null && (
+            <div style={{
+              paddingLeft: indent + 16,
+              fontFamily: 'JetBrains Mono, monospace',
+              fontSize: 11,
+              color: '#94a3b8',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}>
+              <RefreshCw size={9} style={{ animation: 'spin 1s linear infinite' }} />
+              Loading...
+            </div>
+          )}
+          {(children || []).map((child, i) => (
+            <FileNode
+              key={child.path || child.name || i}
+              node={child}
+              projectName={projectName}
+              taskId={taskId}
+              accountId={accountId}
+              depth={depth + 1}
+            />
           ))}
+          {children && children.length === 0 && !loading && (
+            <div style={{
+              paddingLeft: indent + 16,
+              fontFamily: 'JetBrains Mono, monospace',
+              fontSize: 10,
+              color: '#94a3b8',
+              fontStyle: 'italic',
+            }}>
+              (empty)
+            </div>
+          )}
         </>
       )}
     </div>
   );
 }
 
-function SessionFilesTab({ accountId, accountEmail }) {
+function SessionFilesTab({ projectName, taskId, accountId, accountEmail }) {
   const [tree, setTree] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const loadTree = useCallback(async () => {
-    if (!accountId) {
-      setTree([]);
-      return;
-    }
     try {
       setLoading(true);
-      const res = await api.getFileTree(accountId, '');
+      let res;
+      if (projectName && taskId) {
+        res = await api.getTaskFileTreeWithAccount(projectName, taskId, accountId || '', '');
+      } else if (accountId) {
+        res = await api.getFileTree(accountId, '');
+      } else {
+        setTree([]);
+        return;
+      }
       const nodes = res.data ?? res ?? [];
       setTree(Array.isArray(nodes) ? nodes : []);
     } catch (e) {
@@ -426,14 +531,14 @@ function SessionFilesTab({ accountId, accountEmail }) {
     } finally {
       setLoading(false);
     }
-  }, [accountId]);
+  }, [projectName, taskId, accountId]);
 
   useEffect(() => {
     setTree(null);
     loadTree();
   }, [loadTree]);
 
-  if (!accountId) {
+  if (!projectName && !taskId && !accountId) {
     return (
       <div style={{ padding: '32px 16px', textAlign: 'center', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>
         Account not found for this session.
@@ -478,7 +583,13 @@ function SessionFilesTab({ accountId, accountEmail }) {
         </button>
       </div>
       {tree.map((node, i) => (
-        <FileNode key={i} node={node} accountId={accountId} />
+        <FileNode
+          key={i}
+          node={node}
+          projectName={projectName}
+          taskId={taskId}
+          accountId={accountId}
+        />
       ))}
     </div>
   );
@@ -824,12 +935,14 @@ function SessionComposer({
 
 // ─── Main SessionView ─────────────────────────────────────────────────────────
 export default function SessionView() {
-  const { selectedNode } = useAppStore();
-  const { tasks, accounts, fetchAccounts } = useDataStore();
+  const { selectedNode, setSelectedNode } = useAppStore();
+  const { tasks, accounts, fetchAccounts, fetchTasks } = useDataStore();
 
   const [rawContent, setRawContent] = useState(null);
   const [sessionMessages, setSessionMessages] = useState([]);
+  const [credits, setCredits] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [activeTab, setActiveTab] = useState('chat');
   const bottomRef = useRef(null);
 
@@ -840,14 +953,17 @@ export default function SessionView() {
   const isLive = task && [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(task.status);
 
-  const loadContent = useCallback(async ({ silent = false } = {}) => {
+  const loadContent = useCallback(async ({ silent = false, refreshRuntime = false, accountId = '' } = {}) => {
     if (!project || !taskId || !sessionFile) return;
     try {
       if (!silent) setLoading(true);
-      const res = await api.getSessionContent(project, taskId, sessionFile);
+      const res = await api.getSessionContent(project, taskId, sessionFile, {
+        refreshRuntime,
+        accountId,
+      });
       const payload = res?.data ?? res ?? {};
       const content = typeof payload === 'string'
         ? payload
@@ -867,6 +983,7 @@ export default function SessionView() {
   useEffect(() => {
     setRawContent(null);
     setSessionMessages([]);
+    setCredits(null);
     setActiveTab('chat');
     loadContent();
   }, [loadContent]);
@@ -900,7 +1017,109 @@ export default function SessionView() {
   const effectiveSessionId = headerSessionId || selectedSessionId;
 
   const matchedAccount = (accounts || []).find((a) => a.email === effectiveAccountEmail);
-  const effectiveAccountId = matchedAccount?.id || task?.current_account_id || '';
+  const taskBoundAccount = (accounts || []).find((a) => a.id === task?.current_account_id);
+  const effectiveAccountId = taskBoundAccount?.id || matchedAccount?.id || '';
+  const effectiveAccountEmailDisplay = taskBoundAccount?.email || effectiveAccountEmail;
+  const lowCreditsThreshold = 150;
+
+  useEffect(() => {
+    if (!matchedAccount) return;
+    const baseline = matchedAccount?.credits_remaining ?? matchedAccount?.credits ?? null;
+    if (baseline === null || baseline === undefined || baseline === '') return;
+    const num = Number(baseline);
+    setCredits(Number.isFinite(num) ? num : baseline);
+  }, [matchedAccount]);
+
+  useEffect(() => {
+    if (!project || !taskId) return undefined;
+    const es = api.createTaskEventSource(project, taskId);
+
+    const handleCreditsEvent = (evt) => {
+      try {
+        const payload = JSON.parse(evt?.data || '{}');
+        const eventType = String(payload?.type || '').trim().toLowerCase();
+        if (eventType !== 'credits_updated') return;
+        const remaining = payload?.data?.credits_remaining;
+        if (remaining === null || remaining === undefined || remaining === '') {
+          setCredits(null);
+          return;
+        }
+        const num = Number(remaining);
+        setCredits(Number.isFinite(num) ? num : remaining);
+      } catch (_) {
+        // ignore malformed task events
+      }
+    };
+
+    es.addEventListener('credits_updated', handleCreditsEvent);
+    es.addEventListener('message', handleCreditsEvent);
+
+    return () => {
+      es.removeEventListener('credits_updated', handleCreditsEvent);
+      es.removeEventListener('message', handleCreditsEvent);
+      es.close();
+    };
+  }, [project, taskId]);
+
+  const refreshCreditsNow = useCallback(async () => {
+    if (!effectiveAccountId) return;
+    try {
+      const res = await api.refreshCredits(effectiveAccountId);
+      const payload = res?.data ?? res ?? {};
+      const remaining = payload?.credits_remaining;
+      if (remaining === null || remaining === undefined || remaining === '') {
+        setCredits(null);
+        return;
+      }
+      const num = Number(remaining);
+      setCredits(Number.isFinite(num) ? num : remaining);
+    } catch (e) {
+      showToast(`Failed to refresh credits: ${e.message}`, 'error');
+    }
+  }, [effectiveAccountId]);
+
+  const handleManualRefresh = useCallback(async () => {
+    await loadContent({
+      refreshRuntime: true,
+      accountId: effectiveAccountId || '',
+    });
+    await refreshCreditsNow();
+  }, [loadContent, refreshCreditsNow, effectiveAccountId]);
+
+  const handleSwitchAccount = useCallback(async () => {
+    if (!project || !taskId || switching) return;
+    try {
+      setSwitching(true);
+      const res = await api.switchTaskAccount(project, taskId);
+      const data = res?.data ?? res ?? {};
+      await Promise.allSettled([
+        fetchTasks(project),
+        fetchAccounts(),
+      ]);
+      if (selectedNode?.type === 'session' && selectedNode.project === project && selectedNode.taskId === taskId) {
+        setSelectedNode({
+          ...selectedNode,
+          accountEmail: data.account_email || selectedNode.accountEmail || '',
+        });
+      }
+      showToast(`Switched to ${data.account_email || 'new account'}`, 'success');
+      // Refresh to pick up new account info
+      await loadContent({ refreshRuntime: true, accountId: data.account_id || '' });
+    } catch (e) {
+      showToast(`Switch account failed: ${e.message}`, 'error');
+    } finally {
+      setSwitching(false);
+    }
+  }, [
+    project,
+    taskId,
+    switching,
+    loadContent,
+    fetchTasks,
+    fetchAccounts,
+    selectedNode,
+    setSelectedNode,
+  ]);
 
   const tabs = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare size={12} /> },
@@ -947,9 +1166,9 @@ export default function SessionView() {
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
-              {effectiveAccountEmail && (
+              {effectiveAccountEmailDisplay && (
                 <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: '#6b7280' }}>
-                  {effectiveAccountEmail}
+                  {effectiveAccountEmailDisplay}
                 </span>
               )}
               <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: '#64748b' }}>
@@ -968,31 +1187,57 @@ export default function SessionView() {
             </div>
           </div>
 
-          <button
-            onClick={loadContent}
-            disabled={loading}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '6px 12px',
-              border: '1px solid #cbd5e1',
-              borderRadius: 6,
-              background: 'transparent',
-              color: '#6b7280',
-              fontFamily: 'JetBrains Mono, monospace',
-              fontSize: 11,
-              cursor: loading ? 'not-allowed' : 'pointer',
-              opacity: loading ? 0.5 : 1,
-              transition: 'all 0.15s',
-              flexShrink: 0,
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = '#334155'; e.currentTarget.style.background = '#f1f5f9'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = '#6b7280'; e.currentTarget.style.background = 'transparent'; }}
-          >
-            <RefreshCw size={11} style={loading ? { animation: 'spin 1s linear infinite' } : {}} />
-            刷新
-          </button>
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <button
+              onClick={handleSwitchAccount}
+              disabled={switching || isLive}
+              title="Switch to a new account"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                padding: '6px 10px',
+                border: '1px solid #cbd5e1',
+                borderRadius: 6,
+                background: 'transparent',
+                color: '#6b7280',
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                cursor: (switching || isLive) ? 'not-allowed' : 'pointer',
+                opacity: (switching || isLive) ? 0.5 : 1,
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => { if (!switching && !isLive) { e.currentTarget.style.color = '#334155'; e.currentTarget.style.background = '#f1f5f9'; } }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = '#6b7280'; e.currentTarget.style.background = 'transparent'; }}
+            >
+              <Repeat size={11} style={switching ? { animation: 'spin 1s linear infinite' } : {}} />
+              换号
+            </button>
+            <button
+              onClick={handleManualRefresh}
+              disabled={loading}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
+                border: '1px solid #cbd5e1',
+                borderRadius: 6,
+                background: 'transparent',
+                color: '#6b7280',
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                opacity: loading ? 0.5 : 1,
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = '#334155'; e.currentTarget.style.background = '#f1f5f9'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = '#6b7280'; e.currentTarget.style.background = 'transparent'; }}
+            >
+              <RefreshCw size={11} style={loading ? { animation: 'spin 1s linear infinite' } : {}} />
+              刷新
+            </button>
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: 0 }}>
@@ -1027,6 +1272,23 @@ export default function SessionView() {
       {/* ── Chat tab ── */}
       {activeTab === 'chat' && (
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {credits !== null && (
+            <div style={{
+              padding: '6px 16px',
+              fontSize: 11,
+              fontFamily: 'JetBrains Mono, monospace',
+              color: (typeof credits === 'number' && credits < lowCreditsThreshold) ? '#ef4444' : '#64748b',
+              borderBottom: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: (typeof credits === 'number' && credits < lowCreditsThreshold) ? '#fef2f2' : 'transparent',
+              flexShrink: 0,
+            }}>
+              <span>Credits: {typeof credits === 'number' ? credits.toFixed(1) : String(credits)}</span>
+              {(typeof credits === 'number' && credits < lowCreditsThreshold) && <AlertCircle size={12} color="#ef4444" />}
+            </div>
+          )}
           <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', background: '#f8fafc' }}>
             {loading ? (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 128, gap: 8, fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: 'rgba(0,168,136,0.6)' }}>
@@ -1063,7 +1325,12 @@ export default function SessionView() {
       {/* ── Files tab ── */}
       {activeTab === 'files' && (
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          <SessionFilesTab accountId={effectiveAccountId} accountEmail={effectiveAccountEmail} />
+          <SessionFilesTab
+            projectName={project}
+            taskId={taskId}
+            accountId={effectiveAccountId}
+            accountEmail={effectiveAccountEmailDisplay}
+          />
         </div>
       )}
 

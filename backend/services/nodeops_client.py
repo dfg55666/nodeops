@@ -35,7 +35,19 @@ _client: httpx.AsyncClient | None = None
 def get_client() -> httpx.AsyncClient:
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=30.0)
+        _client = httpx.AsyncClient(
+            timeout=30.0,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+                "Referer": "https://createos.nodeops.network/",
+                "sec-ch-ua": "\"Microsoft Edge\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+            },
+        )
     return _client
 
 
@@ -578,10 +590,19 @@ async def get_file_status(runtime_host: str, project_token: str, auth_token: str
     return _unwrap_data(payload)
 
 
-async def get_health(runtime_host: str, retries: int = 1, timeout_s: float = 4.0) -> Any:
-    resp = await _retry_request(
+async def get_health(
+    runtime_host: str,
+    project_token: str,
+    auth_token: str,
+    retries: int = 1,
+    timeout_s: float = 4.0,
+) -> Any:
+    resp = await _runtime_request(
         "GET",
-        f"{_runtime_base(runtime_host)}/health",
+        runtime_host,
+        project_token,
+        auth_token,
+        "/health",
         retries=max(1, int(retries)),
         timeout=timeout_s,
     )

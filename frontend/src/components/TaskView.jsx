@@ -18,6 +18,7 @@ const STATUS_CONFIG = {
   bootstrapping_runtime: { text: '#00a888', border: 'rgba(0,168,136,0.3)', bg: 'rgba(0,168,136,0.08)', label: 'runtime bootstrapping' },
   creating_session:   { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'creating session' },
   sending_message:    { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'sending message' },
+  submitting_commit:  { text: '#00a888', border: 'rgba(0,168,136,0.3)',  bg: 'rgba(0,168,136,0.08)',  label: 'submitting commit' },
   pending:            { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'pending' },
   switching:          { text: '#f59e0b', border: 'rgba(245,158,11,0.3)', bg: 'rgba(245,158,11,0.08)', label: 'switching' },
   syncing:            { text: '#4a9eff', border: 'rgba(74,158,255,0.3)', bg: 'rgba(74,158,255,0.08)', label: 'syncing' },
@@ -330,12 +331,31 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
   const loops   = task.current_loop ?? task.loop_count ?? 0;
   const maxL    = task.max_loops ?? '∞';
   const message = task.message || task.prompt || '';
+  const commitPrompt = task.commit_prompt || '';
+  const fallbackSync = task.fallback_sync !== false;
   const loopHistory = task.loops || task.loop_results || task.completed_loops || [];
   const isActive = [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(status);
+  const [editingMessage, setEditingMessage] = useState(false);
+  const [messageDraft, setMessageDraft] = useState(message);
+  const [editingCommitConfig, setEditingCommitConfig] = useState(false);
+  const [commitPromptDraft, setCommitPromptDraft] = useState(commitPrompt);
+  const [fallbackSyncDraft, setFallbackSyncDraft] = useState(fallbackSync);
+
+  useEffect(() => {
+    if (!editingMessage) {
+      setMessageDraft(message);
+    }
+  }, [message, editingMessage]);
+  useEffect(() => {
+    if (!editingCommitConfig) {
+      setCommitPromptDraft(commitPrompt);
+      setFallbackSyncDraft(fallbackSync);
+    }
+  }, [commitPrompt, fallbackSync, editingCommitConfig]);
 
   const act = async (fn, label) => {
     try {
@@ -364,6 +384,37 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
     }
   };
 
+  const handleSaveMessage = async () => {
+    try {
+      setBusy(true);
+      await api.updateTask(project, taskId, { message: messageDraft });
+      await onRefresh();
+      setEditingMessage(false);
+      showToast('Prompt updated', 'success');
+    } catch (e) {
+      showToast(`Update failed: ${e.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveCommitConfig = async () => {
+    try {
+      setBusy(true);
+      await api.updateTask(project, taskId, {
+        commit_prompt: commitPromptDraft.trim() || null,
+        fallback_sync: Boolean(fallbackSyncDraft),
+      });
+      await onRefresh();
+      setEditingCommitConfig(false);
+      showToast('Commit strategy updated', 'success');
+    } catch (e) {
+      showToast(`Update failed: ${e.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, padding: '16px 24px' }}>
 
@@ -379,6 +430,111 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
         {isActive && task.current_account_id && (
           <MetaChip label="account" value={task.current_account_id} accent />
         )}
+      </div>
+
+      <div>
+        <SectionLabel>credit exhausted strategy</SectionLabel>
+        <div style={{ marginTop: 6, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {!editingCommitConfig && (
+            <ActionBtn
+              icon={<FileText size={12} />}
+              label="Edit"
+              disabled={busy}
+              onClick={() => setEditingCommitConfig(true)}
+            />
+          )}
+          {editingCommitConfig && (
+            <>
+              <ActionBtn
+                icon={<Check size={12} />}
+                label="Save"
+                variant="accent"
+                disabled={busy}
+                onClick={handleSaveCommitConfig}
+              />
+              <ActionBtn
+                icon={<Minus size={12} />}
+                label="Cancel"
+                disabled={busy}
+                onClick={() => {
+                  setCommitPromptDraft(commitPrompt);
+                  setFallbackSyncDraft(fallbackSync);
+                  setEditingCommitConfig(false);
+                }}
+              />
+            </>
+          )}
+        </div>
+        <div style={{
+          marginTop: 6,
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          padding: '10px 14px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+        }}>
+          {editingCommitConfig ? (
+            <>
+              <textarea
+                value={commitPromptDraft}
+                onChange={(e) => setCommitPromptDraft(e.target.value)}
+                rows={5}
+                disabled={busy}
+                placeholder="Empty = skip helper push and directly fallback to local sync."
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  fontFamily: 'JetBrains Mono, monospace',
+                  fontSize: 11,
+                  color: '#334155',
+                  lineHeight: 1.6,
+                  border: '1px solid #cbd5e1',
+                  background: '#ffffff',
+                  padding: '10px 12px',
+                  resize: 'vertical',
+                }}
+              />
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                color: '#475569',
+                cursor: 'pointer',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={fallbackSyncDraft}
+                  onChange={(e) => setFallbackSyncDraft(e.target.checked)}
+                  disabled={busy}
+                />
+                fallback to local sync when helper push fails
+              </label>
+            </>
+          ) : (
+            <>
+              <pre style={{
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                color: '#334155',
+                whiteSpace: 'pre-wrap',
+                lineHeight: 1.6,
+                margin: 0,
+              }}>
+                {commitPrompt || '(disabled)'}
+              </pre>
+              <span style={{
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                color: '#64748b',
+              }}>
+                fallback_sync: {fallbackSync ? 'enabled' : 'disabled'}
+              </span>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Actions */}
@@ -417,15 +573,64 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
       </div>
 
       {/* Prompt */}
-      {message && (
-        <div>
-          <SectionLabel>prompt / message</SectionLabel>
-          <div style={{
-            marginTop: 6,
-            background: '#f8fafc',
-            border: '1px solid #e2e8f0',
-            padding: '10px 14px',
-          }}>
+      <div>
+        <SectionLabel>prompt / message</SectionLabel>
+        <div style={{ marginTop: 6, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {!editingMessage && (
+            <ActionBtn
+              icon={<FileText size={12} />}
+              label="Edit"
+              disabled={busy}
+              onClick={() => setEditingMessage(true)}
+            />
+          )}
+          {editingMessage && (
+            <>
+              <ActionBtn
+                icon={<Check size={12} />}
+                label="Save"
+                variant="accent"
+                disabled={busy}
+                onClick={handleSaveMessage}
+              />
+              <ActionBtn
+                icon={<Minus size={12} />}
+                label="Cancel"
+                disabled={busy}
+                onClick={() => {
+                  setMessageDraft(message);
+                  setEditingMessage(false);
+                }}
+              />
+            </>
+          )}
+        </div>
+        <div style={{
+          marginTop: 6,
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          padding: '10px 14px',
+        }}>
+          {editingMessage ? (
+            <textarea
+              value={messageDraft}
+              onChange={(e) => setMessageDraft(e.target.value)}
+              rows={8}
+              disabled={busy}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                fontFamily: 'JetBrains Mono, monospace',
+                fontSize: 11,
+                color: '#334155',
+                lineHeight: 1.6,
+                border: '1px solid #cbd5e1',
+                background: '#ffffff',
+                padding: '10px 12px',
+                resize: 'vertical',
+              }}
+            />
+          ) : (
             <pre style={{
               fontFamily: 'JetBrains Mono, monospace',
               fontSize: 11,
@@ -434,11 +639,11 @@ function OverviewTab({ task, project, taskId, onRefresh }) {
               lineHeight: 1.6,
               margin: 0,
             }}>
-              {message}
+              {message || '(empty)'}
             </pre>
-          </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Assigned accounts */}
       {(() => {
@@ -565,7 +770,7 @@ export default function TaskView() {
     const activeStatuses = [
       'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
       'acquiring_account', 'auto_registering_account',
-      'bootstrapping_runtime', 'creating_session', 'sending_message',
+      'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
     ];
     if (task && activeStatuses.includes(task.status)) {
       pollRef.current = setInterval(refresh, 6000);
@@ -590,7 +795,7 @@ export default function TaskView() {
   const isActive = [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(task.status);
 
   return (

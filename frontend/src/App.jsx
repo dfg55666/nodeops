@@ -219,7 +219,7 @@ export default function App() {
           [
             'running', 'pending', 'monitoring', 'switching', 'syncing', 'pushing',
             'acquiring_account', 'auto_registering_account',
-            'bootstrapping_runtime', 'creating_session', 'sending_message',
+            'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
           ].includes(t.status)
         );
         if (hasActive) fetchTasks(pName);

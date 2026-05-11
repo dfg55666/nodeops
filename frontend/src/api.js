@@ -60,17 +60,26 @@ export const cancelTask         = (project, taskId) =>
   post(`/api/tasks/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/cancel`);
 export const createEmptySessionForTask = (project, taskId) =>
   post(`/api/tasks/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/sessions/empty`);
+export const switchTaskAccount  = (project, taskId) =>
+  post(`/api/tasks/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/switch-account`);
 export const getTaskMessages    = (project, taskId) =>
   get(`/api/tasks/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/messages`);
 
 // ─── Session History ──────────────────────────────────────────────────────────
 export const getSessionHistory  = (project, taskId) =>
   get(`/api/sessions/history/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}`);
-export const getSessionContent  = (project, taskId, sessionFile) =>
-  get(
+export const getSessionContent  = (project, taskId, sessionFile, opts = {}) => {
+  const refreshRuntime = Boolean(opts?.refreshRuntime);
+  const accountId = String(opts?.accountId || '').trim();
+  const params = new URLSearchParams();
+  params.set('session_file', String(sessionFile || ''));
+  if (refreshRuntime) params.set('refresh_runtime', 'true');
+  if (accountId) params.set('account_id', accountId);
+  return get(
     `/api/sessions/history/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}/content` +
-    `?session_file=${encodeURIComponent(sessionFile)}`
+    `?${params.toString()}`
   );
+};
 export const sendSessionMessage = (sessionId, accountId, data) =>
   post(
     `/api/sessions/${encodeURIComponent(sessionId)}/message?account_id=${encodeURIComponent(accountId)}`,
@@ -85,8 +94,33 @@ export const getTaskFileTree    = (projectName, taskId, path = '') =>
     `/api/files/tree/task?project_name=${encodeURIComponent(projectName)}` +
     `&task_id=${encodeURIComponent(taskId)}&path=${encodeURIComponent(path)}`
   );
+export const getTaskFileTreeWithAccount = (projectName, taskId, accountId, path = '') =>
+  get(
+    `/api/files/tree/task?project_name=${encodeURIComponent(projectName)}` +
+    `&task_id=${encodeURIComponent(taskId)}&path=${encodeURIComponent(path)}` +
+    `&account_id=${encodeURIComponent(accountId || '')}`
+  );
 export const getFileContent     = (accountId, path) =>
   get(`/api/files/content?account_id=${encodeURIComponent(accountId)}&path=${encodeURIComponent(path)}`);
+export const getTaskFileContent = (projectName, taskId, path, accountId = '') =>
+  get(
+    `/api/files/content/task?project_name=${encodeURIComponent(projectName)}` +
+    `&task_id=${encodeURIComponent(taskId)}&path=${encodeURIComponent(path)}` +
+    `&account_id=${encodeURIComponent(accountId || '')}`
+  );
+export async function downloadWorkspacePath(accountId, path, isDir = false) {
+  return get(
+    `/api/files/download?account_id=${encodeURIComponent(accountId)}` +
+    `&path=${encodeURIComponent(path)}&is_dir=${isDir ? 'true' : 'false'}`
+  );
+}
+export async function downloadTaskWorkspacePath(projectName, taskId, path, isDir = false, accountId = '') {
+  return get(
+    `/api/files/download/task?project_name=${encodeURIComponent(projectName)}` +
+    `&task_id=${encodeURIComponent(taskId)}&path=${encodeURIComponent(path)}` +
+    `&is_dir=${isDir ? 'true' : 'false'}&account_id=${encodeURIComponent(accountId || '')}`
+  );
+}
 
 // ─── Overview ─────────────────────────────────────────────────────────────────
 export const getOverview        = () => get('/api/overview');

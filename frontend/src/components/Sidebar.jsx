@@ -17,6 +17,7 @@ function StatusDot({ status, size = 7 }) {
     bootstrapping_runtime: { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
     creating_session:   { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
     sending_message:    { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
+    submitting_commit:  { color: '#00a888', glow: '0 0 5px rgba(0,168,136,0.6)' },
     pending:            { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.6)' },
     switching:          { color: '#f59e0b', glow: '0 0 4px rgba(245,158,11,0.5)' },
     syncing:            { color: '#4a9eff', glow: '0 0 4px rgba(74,158,255,0.5)' },
@@ -35,7 +36,7 @@ function StatusDot({ status, size = 7 }) {
   const isActive = [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(status);
   return (
     <span
@@ -62,6 +63,7 @@ function TaskStatusIcon({ status }) {
     case 'bootstrapping_runtime':
     case 'creating_session':
     case 'sending_message':
+    case 'submitting_commit':
       return <Play size={sz} style={{ color: '#00a888', flexShrink: 0 }} />;
     case 'pending':
     case 'switching':
@@ -235,7 +237,7 @@ function TaskRow({ task, project, baseIndent }) {
   const isRunning = [
     'running', 'monitoring', 'pending', 'switching', 'syncing', 'pushing',
     'acquiring_account', 'auto_registering_account',
-    'bootstrapping_runtime', 'creating_session', 'sending_message',
+    'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit',
   ].includes(status);
 
   const subIndent = baseIndent + 18;
@@ -386,7 +388,7 @@ function ProjectRow({ project }) {
   };
 
   const runningCount = taskList.filter((t) =>
-    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message'].includes(t.status)
+    ['running', 'monitoring', 'bootstrapping_runtime', 'creating_session', 'sending_message', 'submitting_commit'].includes(t.status)
   ).length;
   const pendingCount = taskList.filter((t) =>
     ['pending', 'switching', 'syncing', 'pushing', 'acquiring_account', 'auto_registering_account'].includes(t.status)

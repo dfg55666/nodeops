@@ -22,6 +22,8 @@ export default function NewTaskModal() {
   const [taskId,   setTaskId]   = useState('');
   const [maxLoops, setMaxLoops] = useState(5);
   const [message,  setMessage]  = useState('');
+  const [commitPrompt, setCommitPrompt] = useState('');
+  const [fallbackSync, setFallbackSync] = useState(true);
   const [modelId,  setModelId]  = useState(DEFAULT_MODEL_ID);
   const [autoStart, setAutoStart] = useState(true);
   const [loading,  setLoading]  = useState(false);
@@ -53,6 +55,8 @@ export default function NewTaskModal() {
         project:   project.trim(),
         mode,
         message:   message.trim(),
+        commit_prompt: commitPrompt.trim() || undefined,
+        fallback_sync: Boolean(fallbackSync),
         model:     buildModelRef(modelId) || undefined,
         max_loops: mode === 'auto' ? Number(maxLoops) : 1,
         task_id:   taskId.trim() || undefined,
@@ -288,6 +292,50 @@ Example:
               <p className="mt-1 font-mono text-[10px] text-red-600">{errors.message}</p>
             )}
           </div>
+
+          <div>
+            <label className="block font-mono text-[10px] text-[#64748b] uppercase tracking-widest mb-1.5">
+              commit prompt (on credit exhausted)
+            </label>
+            <textarea
+              value={commitPrompt}
+              onChange={(e) => setCommitPrompt(e.target.value)}
+              rows={4}
+              placeholder="Ask agent to commit and push in a fresh session on same deployment.
+
+Example:
+Please commit all current changes and push to origin. If there are no changes, respond with no-op."
+              className="
+                w-full bg-white border border-slate-300 text-[12px] font-mono text-[#1e293b]
+                px-3 py-2.5 resize-none focus:outline-none focus:border-emerald-400 placeholder-[#94a3b8] leading-relaxed transition-colors rounded-lg
+              "
+            />
+            <p className="mt-1 font-mono text-[10px] text-[#94a3b8]">
+              Empty means skip helper push and directly run local fallback sync.
+            </p>
+          </div>
+
+          {/* Auto-start toggle */}
+          <label className="flex items-center gap-2.5 cursor-pointer select-none">
+            <div
+              onClick={() => setFallbackSync((v) => !v)}
+              className={`
+                w-8 h-4 relative transition-colors
+                ${fallbackSync ? 'bg-emerald-100 border-emerald-300' : 'bg-slate-200 border-slate-300'}
+                border rounded-full
+              `}
+            >
+              <span
+                className={`
+                  absolute top-0.5 w-3 h-3 transition-all rounded-full
+                  ${fallbackSync ? 'left-4 bg-emerald-600' : 'left-0.5 bg-[#6b7280]'}
+                `}
+              />
+            </div>
+            <span className="font-mono text-[11px] text-[#4b5563]">
+              Enable fallback sync when helper push fails
+            </span>
+          </label>
 
           {/* Auto-start toggle */}
           <label className="flex items-center gap-2.5 cursor-pointer select-none">

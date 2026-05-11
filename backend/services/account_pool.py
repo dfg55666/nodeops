@@ -155,6 +155,33 @@ def release_account(account_id: str, exhausted: bool = False):
     logger.info(f"Released account {account_id}, exhausted={exhausted}")
 
 
+def release_task_locks(task_id: str, keep_account_id: str | None = None) -> int:
+    """Release every account lock held by a task.
+
+    Returns number of released locks.
+    """
+    keep_id = str(keep_account_id or "").strip()
+    tid = str(task_id or "").strip()
+    if not tid:
+        return 0
+
+    accounts = _load()
+    released = 0
+    changed = False
+    for acc in accounts:
+        if str(acc.get("locked_by_task") or "").strip() != tid:
+            continue
+        if keep_id and str(acc.get("id") or "").strip() == keep_id:
+            continue
+        acc["locked_by_task"] = None
+        released += 1
+        changed = True
+    if changed:
+        _save(accounts)
+        logger.info("Released %s stale locks for task %s", released, tid)
+    return released
+
+
 def mark_account_status(account_id: str, status: str):
     """Set account status (available / exhausted / disabled)."""
     update_account(account_id, {"status": status})
