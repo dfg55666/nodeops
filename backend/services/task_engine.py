@@ -24,12 +24,19 @@ from backend.services import account_pool
 from backend.services import workspace_sync
 from backend.services import session_recorder
 from backend.services import credit_monitor
+from backend.services.message_utils import (
+    extract_message_role as _extract_message_role,
+    extract_message_text as _extract_message_text,
+    normalize_chat_role as _normalize_chat_role,
+    normalize_messages as _normalize_messages,
+)
 from backend.services.register import (
     GmailConfig,
     RegisterConfig,
     generate_gmail_aliases,
     gmail_auto_register,
 )
+from backend.services.sse_parser import parse_sse_payloads
 
 logger = logging.getLogger(__name__)
 
@@ -1153,54 +1160,14 @@ async def _consume_sse_stream(
     sse_state: dict[str, Any],
 ):
     """Consume runtime SSE and update monitor state."""
-    event_name = "message"
-    data_lines: list[str] = []
-
-    async for line in noc.connect_sse(runtime_host, project_token, session_id):
+    async for event_name, payload in parse_sse_payloads(
+        noc.connect_sse(runtime_host, project_token, session_id)
+    ):
         if _stop_events.get(task_id, asyncio.Event()).is_set():
             break
 
         sse_state["connected"] = True
         sse_state["last_activity_at"] = time.monotonic()
-
-        if line is None:
-            continue
-        line = str(line)
-
-        if line.startswith(":"):
-            # SSE comment / heartbeat line
-            continue
-
-        if line.startswith("event:"):
-            event_name = line.split(":", 1)[1].strip() or "message"
-            continue
-
-        if line.startswith("data:"):
-            data_lines.append(line.split(":", 1)[1].lstrip())
-            continue
-
-        if line.strip() == "":
-            if data_lines:
-                await _flush_sse_event(
-                    project_name=project_name,
-                    task_id=task_id,
-                    account_id=account_id,
-                    account_email=account_email,
-                    session_index=session_index,
-                    session_id=session_id,
-                    event_name=event_name,
-                    data_text="\n".join(data_lines),
-                    sse_state=sse_state,
-                )
-                data_lines.clear()
-                event_name = "message"
-            continue
-
-        # Unknown line type: preserve as data to avoid loss.
-        data_lines.append(line)
-
-    # Flush trailing event, if any.
-    if data_lines:
         await _flush_sse_event(
             project_name=project_name,
             task_id=task_id,
@@ -1209,7 +1176,7 @@ async def _consume_sse_stream(
             session_index=session_index,
             session_id=session_id,
             event_name=event_name,
-            data_text="\n".join(data_lines),
+            payload=payload,
             sse_state=sse_state,
         )
 
@@ -1222,15 +1189,9 @@ async def _flush_sse_event(
     session_index: int,
     session_id: str,
     event_name: str,
-    data_text: str,
+    payload: Any,
     sse_state: dict[str, Any],
 ):
-    payload: Any = data_text
-    try:
-        payload = json.loads(data_text)
-    except Exception:
-        pass
-
     # Signal credit exhaustion eagerly if SSE explicitly reports a credit/quota error.
     if _payload_indicates_credit_exhausted(payload):
         sse_state["credit_exhausted"] = True
@@ -1262,22 +1223,6 @@ async def _flush_sse_event(
                 sse_state["last_status_at"] = time.monotonic()
                 if status_type == "busy":
                     sse_state["busy_seen"] = True
-
-
-def _normalize_messages(messages_data: Any) -> list[dict]:
-    if isinstance(messages_data, list):
-        return [m for m in messages_data if isinstance(m, dict)]
-    if isinstance(messages_data, dict):
-        messages = (
-            messages_data.get("messages")
-            or messages_data.get("items")
-            or messages_data.get("data")
-            or []
-        )
-        if isinstance(messages, list):
-            return [m for m in messages if isinstance(m, dict)]
-    return []
-
 
 def _render_runtime_chat_rows(messages: list[dict]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
@@ -2118,173 +2063,3 @@ async def _sync_and_push(project_name: str, task_id: str,
     except Exception as e:
         logger.error(f"Task {task_id}: git push failed: {e}")
         return None
-
-
-def _extract_message_text(msg: dict) -> str:
-    """Extract readable text from a message object."""
-    # Messages may have `content` as string or `parts` as list.
-    if isinstance(msg.get("content"), str):
-        return msg["content"]
-
-    parts = msg.get("parts", msg.get("content", []))
-    if isinstance(parts, list):
-        texts: list[str] = []
-
-        def _to_text(value: Any, limit: int = 0) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, (dict, list)):
-                raw = json.dumps(value, ensure_ascii=False)
-            else:
-                raw = str(value)
-            raw = raw.strip()
-            if limit and len(raw) > limit:
-                return raw[:limit] + "..."
-            return raw
-
-        for part in parts:
-            if isinstance(part, str):
-                plain = part.strip()
-                if plain:
-                    texts.append(plain)
-                continue
-            if not isinstance(part, dict):
-                continue
-
-            ptype = str(part.get("type") or "").strip().lower().replace("_", "-")
-            if ptype == "text":
-                txt = _to_text(part.get("text"))
-                if txt:
-                    texts.append(txt)
-            elif ptype == "tool":
-                invocation = part.get("toolInvocation")
-                if not isinstance(invocation, dict):
-                    invocation = {}
-
-                name = _to_text(
-                    invocation.get("toolName")
-                    or invocation.get("tool_name")
-                    or part.get("toolName")
-                    or "tool"
-                )
-                state = str(invocation.get("state") or "").strip().lower()
-                label = _to_text(invocation.get("label"))
-                duration = invocation.get("durationMs")
-                is_error = bool(invocation.get("isError", False))
-
-                args_txt = _to_text(invocation.get("args"), limit=300)
-
-                result_txt = ""
-                result = invocation.get("result")
-                if isinstance(result, dict):
-                    result_content = result.get("content")
-                    if isinstance(result_content, list):
-                        result_parts: list[str] = []
-                        for rc in result_content:
-                            if isinstance(rc, dict):
-                                rc_txt = _to_text(rc.get("text") or rc.get("content"))
-                                if rc_txt:
-                                    result_parts.append(rc_txt)
-                            elif isinstance(rc, str):
-                                rc_txt = rc.strip()
-                                if rc_txt:
-                                    result_parts.append(rc_txt)
-                        result_txt = "\n".join([r for r in result_parts if r]).strip()
-                    elif isinstance(result_content, str):
-                        result_txt = result_content.strip()
-                    if not result_txt:
-                        result_txt = _to_text(result, limit=500)
-                elif result is not None:
-                    result_txt = _to_text(result, limit=500)
-
-                header = f"[Tool: {name}]"
-                if state:
-                    header += f" [{state}]"
-                if duration:
-                    header += f" ({duration}ms)"
-                if is_error:
-                    header += " ERROR"
-
-                lines = [header]
-                if args_txt:
-                    lines.append(args_txt)
-                if result_txt:
-                    lines.append(f"Result:\n{result_txt[:500]}")
-                elif label:
-                    lines.append(label)
-                texts.append("\n".join([line for line in lines if line]))
-            elif ptype == "tool-use":
-                name = _to_text(part.get("name") or part.get("toolName") or part.get("tool_name") or "tool")
-                inp = part.get("input")
-                if inp is None:
-                    inp = part.get("args")
-                inp_txt = _to_text(inp, limit=200)
-                if inp_txt:
-                    texts.append(f"[Tool: {name}]\n{inp_txt}")
-                else:
-                    texts.append(f"[Tool: {name}]")
-            elif ptype == "tool-result":
-                name = _to_text(part.get("name") or part.get("toolName") or part.get("tool_name") or "tool")
-                out = part.get("output")
-                if out is None:
-                    out = part.get("content")
-                if out is None:
-                    out = part.get("text")
-                out_txt = _to_text(out, limit=300)
-                if out_txt:
-                    texts.append(f"[Tool Result: {name}]\n{out_txt}")
-                else:
-                    texts.append(f"[Tool Result: {name}]")
-            elif ptype in {"step-finish", "step-start"}:
-                continue
-            else:
-                fallback = _to_text(part.get("text") or part.get("content"))
-                if fallback:
-                    texts.append(f"[{ptype or 'part'}] {fallback}")
-
-        joined = "\n\n".join([t for t in texts if str(t).strip()])
-        if joined.strip():
-            return joined
-
-    # NodeOps often puts structured errors under msg.info.error
-    info = msg.get("info")
-    if isinstance(info, dict):
-        err = info.get("error")
-        if isinstance(err, dict):
-            err_name = str(err.get("name") or "").strip()
-            err_data = err.get("data")
-            if isinstance(err_data, dict):
-                msg_text = str(err_data.get("message") or "").strip()
-                status_code = err_data.get("statusCode")
-                if msg_text:
-                    if status_code is not None and str(status_code).strip():
-                        return f"[error:{status_code}] {msg_text}"
-                    if err_name:
-                        return f"[{err_name}] {msg_text}"
-                    return msg_text
-            if err_name:
-                return f"[{err_name}]"
-
-    return str(msg.get("content", msg.get("text", "")))
-
-
-def _extract_message_role(msg: dict) -> str:
-    """Extract normalized role from runtime message payload."""
-    role = msg.get("role")
-    if role:
-        return str(role).strip().lower()
-    info = msg.get("info")
-    if isinstance(info, dict):
-        info_role = info.get("role")
-        if info_role:
-            return str(info_role).strip().lower()
-    return "unknown"
-
-
-def _normalize_chat_role(role: str) -> str:
-    r = str(role or "").strip().lower()
-    if r in {"user", "assistant"}:
-        return r
-    if r == "unknown":
-        return "assistant"
-    return r
